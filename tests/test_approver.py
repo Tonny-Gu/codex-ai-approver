@@ -30,10 +30,13 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.model, "gpt-5.5")
         self.assertEqual(config.reasoning_effort, "medium")
 
-    def test_reads_yaml(self) -> None:
+    def test_reads_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "config.yaml"
-            path.write_text("model: gpt-5.4\nreasoning_effort: high\n", encoding="utf-8")
+            path = Path(tmp) / "config.json"
+            path.write_text(
+                '{"model":"gpt-5.4","reasoning_effort":"high"}\n',
+                encoding="utf-8",
+            )
             config = hook.load_config(path)
         self.assertEqual(config.model, "gpt-5.4")
         self.assertEqual(config.reasoning_effort, "high")
@@ -101,8 +104,8 @@ class HookMainTests(unittest.TestCase):
         )
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
-            config_path = Path(tmp) / "config.yaml"
-            config_path.write_text("", encoding="utf-8")
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text("{}\n", encoding="utf-8")
             with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout), mock.patch.dict(
                 "os.environ",
                 {"CODEX_AI_APPROVER_CONFIG": str(config_path)},

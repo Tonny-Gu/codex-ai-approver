@@ -10,13 +10,8 @@ import re
 import sys
 import traceback
 
-try:
-    import yaml
-except ModuleNotFoundError:  # pragma: no cover - exercised only without PyYAML.
-    yaml = None
 
-
-DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.yaml"
+DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "medium"
 VALID_ERROR_POLICIES = {"deny", "allow"}
@@ -69,7 +64,7 @@ def load_config(path: Path | None = None) -> ApproverConfig:
     path = path or config_path()
     payload: dict[str, Any] = {}
     if path.is_file():
-        payload = _load_yaml(path)
+        payload = _load_json(path)
 
     model = _as_str(payload.get("model"), DEFAULT_MODEL)
     reasoning_effort = _as_str(
@@ -247,13 +242,11 @@ def _handle_error(exc: Exception) -> int:
     return 0
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
-    if yaml is None:
-        raise RuntimeError("PyYAML is required to read ~/.codex-ai-approver.yaml")
+def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+        data = json.load(handle)
     if not isinstance(data, dict):
-        raise ValueError(f"{path} must contain a YAML mapping")
+        raise ValueError(f"{path} must contain a JSON object")
     return data
 
 
