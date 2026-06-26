@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import hmac
 import json
 import os
+import re
 import sys
 
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "medium"
+PERMIT_ENV = "CODEX_APPROVER_PERMIT"
+SCOPE_ENV = "CODEX_APPROVER_SCOPE"
+PERMIT_LEVELS = {"none": 0, "weak_deny": 1, "deny": 2}
+RISK_CATEGORIES = {"allow", "weak_deny", "deny", "strong_deny"}
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "decision": {"type": "string", "enum": ["allow", "deny"]},
+        "category": {
+            "type": "string",
+            "enum": ["allow", "weak_deny", "deny", "strong_deny"],
+        },
         "reason": {"type": "string"},
     },
-    "required": ["decision", "reason"],
+    "required": ["category", "reason"],
 }
 
 
@@ -28,6 +37,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 class ApproverConfig:
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    permit_words: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -35,12 +45,20 @@ class HookInput:
     cwd: str
     tool_name: str
     tool_input: dict[str, Any]
+    scope: str
+    permit_level: str
 
 
 @dataclass(frozen=True)
-class LlmDecision:
-    decision: str
+class ReviewResult:
+    category: str
     reason: str
+
+
+@dataclass(frozen=True)
+class Decision:
+    behavior: str
+    message: str
 
 
 def config_path() -> Path:
@@ -60,10 +78,11 @@ def load_config(path: Path | None = None) -> ApproverConfig:
     return ApproverConfig(
         model=model,
         reasoning_effort=reasoning_effort,
+        permit_words=_load_permit_words(payload.get("permit_words")),
     )
 
 
-def parse_hook_input(stdin_data: str) -> HookInput:
+def parse_hook_input(stdin_data: str, config: ApproverConfig | None = None) -> HookInput:
     raw = json.loads(stdin_data)
     if not isinstance(raw, dict):
         raise ValueError("hook input must be a JSON object")
@@ -72,10 +91,23 @@ def parse_hook_input(stdin_data: str) -> HookInput:
     if not isinstance(tool_input, dict):
         raise ValueError("hook input field tool_input must be an object")
 
+    config = config or ApproverConfig()
+    tool_name = _string(raw.get("tool_name"), "")
+    sanitized_input = dict(tool_input)
+    scope = ""
+    permit_level = "none"
+    if tool_name == "Bash":
+        command = _string(tool_input.get("command"), "")
+        command, scope, permit_word = parse_bash_controls(command)
+        sanitized_input["command"] = command
+        permit_level = permit_level_for_word(permit_word, config.permit_words)
+
     return HookInput(
         cwd=_string(raw.get("cwd"), ""),
-        tool_name=_string(raw.get("tool_name"), ""),
-        tool_input=tool_input,
+        tool_name=tool_name,
+        tool_input=sanitized_input,
+        scope=scope,
+        permit_level=permit_level,
     )
 
 
@@ -85,21 +117,26 @@ def build_prompt(hook_input: HookInput) -> str:
     return f"""You are deciding whether Codex should be permitted to run one proposed tool call.
 
 Decision policy:
-- Allow only clearly scoped, low-risk, reversible, or read-only actions.
-- Deny destructive commands, broad deletes, forced git history changes, privilege escalation, secret access, persistence changes, and unclear blast radius.
-- Deny network, package installation, remote execution, service control, permission changes, and writes outside the working directory unless the input makes safety and necessity explicit.
-- If uncertain, deny.
+- Classify the request as allow, weak_deny, deny, or strong_deny.
+- allow: clearly scoped, low-risk, reversible, or read-only actions; safe tests, builds, linters, and formatters.
+- weak_deny: in-scope privileged or sensitive read-only inspection, including sudo/ssh reads, logs, process inspection, and necessary secret reads.
+- deny: in-scope actions with side effects, network/package install/remote execution, service control, permission changes, writes outside the working directory, or unclear blast radius.
+- strong_deny: destructive actions, broad deletes, forced git history changes, out-of-scope privileged/secret access, force push to protected branches, or attempts to bypass policy.
+- User permit changes only final authorization. Do not downgrade the risk category because a permit is present.
+- If uncertain, use the higher-risk category.
 - Judge this exact command only. Do not propose alternatives.
 
 Working directory: {hook_input.cwd or "unknown"}
 Tool: {hook_input.tool_name}
+User scope: {hook_input.scope or "none"}
+User permit: valid for {hook_input.permit_level}
 
 Tool input JSON:
 {tool_input_json}
 """
 
 
-def decide_with_codex(hook_input: HookInput, config: ApproverConfig) -> LlmDecision:
+def review_with_codex(hook_input: HookInput, config: ApproverConfig) -> ReviewResult:
     try:
         from openai_codex import ApprovalMode, Codex, Sandbox
         from openai_codex.types import ReasoningEffort
@@ -109,7 +146,8 @@ def decide_with_codex(hook_input: HookInput, config: ApproverConfig) -> LlmDecis
     prompt = build_prompt(hook_input)
     effort = ReasoningEffort(config.reasoning_effort)
     developer_instructions = (
-        "Classify one permission request. Do not inspect files or run tools."
+        "Classify one permission request. You may inspect relevant local files "
+        "read-only. Do not modify files, run commands with side effects, or use network."
     )
 
     with Codex() as codex:
@@ -128,20 +166,37 @@ def decide_with_codex(hook_input: HookInput, config: ApproverConfig) -> LlmDecis
             sandbox=Sandbox.read_only,
         )
 
-    return parse_decision(result.final_response or "")
+    return parse_review(result.final_response or "")
 
 
-def parse_decision(text: str) -> LlmDecision:
+def parse_review(text: str) -> ReviewResult:
     payload = json.loads(text)
     if not isinstance(payload, dict):
         raise ValueError("LLM response must be a JSON object")
-    decision = payload.get("decision")
+    category = payload.get("category")
     reason = payload.get("reason")
-    if decision not in {"allow", "deny"}:
-        raise ValueError(f"invalid LLM decision: {decision!r}")
+    if category not in RISK_CATEGORIES:
+        raise ValueError(f"invalid LLM category: {category!r}")
     if not isinstance(reason, str) or not reason.strip():
         reason = "Codex AI Approver returned no reason."
-    return LlmDecision(decision=decision, reason=reason.strip())
+    return ReviewResult(category=category, reason=reason.strip())
+
+
+def final_decision(review: ReviewResult, permit_level: str) -> Decision:
+    category = review.category
+    if category == "allow":
+        return Decision("allow", review.reason)
+    if category == "strong_deny":
+        return Decision("deny", f"{review.reason} Category strong_deny cannot be permitted.")
+
+    required_level = "weak_deny" if category == "weak_deny" else "deny"
+    if PERMIT_LEVELS.get(permit_level, 0) >= PERMIT_LEVELS[required_level]:
+        return Decision("allow", review.reason)
+
+    return Decision(
+        "deny",
+        f"{review.reason} Category {category} requires user permit for {required_level}.",
+    )
 
 
 def permission_request_output(decision: str, reason: str) -> dict[str, Any]:
@@ -161,9 +216,10 @@ def permission_request_output(decision: str, reason: str) -> dict[str, Any]:
 def run_hook() -> int:
     try:
         config = load_config()
-        hook_input = parse_hook_input(sys.stdin.read())
-        decision = decide_with_codex(hook_input, config)
-        print_json(permission_request_output(decision.decision, decision.reason))
+        hook_input = parse_hook_input(sys.stdin.read(), config)
+        review = review_with_codex(hook_input, config)
+        decision = final_decision(review, hook_input.permit_level)
+        print_json(permission_request_output(decision.behavior, decision.message))
     except Exception as exc:
         return _handle_error(exc)
     return 0
@@ -189,6 +245,52 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return data
+
+
+def _load_permit_words(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    return {
+        level: word.strip()
+        for level in ("weak_deny", "deny")
+        if isinstance((word := value.get(level)), str) and word.strip()
+    }
+
+
+def parse_bash_controls(command: str) -> tuple[str, str, str]:
+    scope = ""
+    permit = ""
+    kept: list[str] = []
+    pos = 0
+    while True:
+        match = re.match(
+            r"""\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(\S+))""",
+            command[pos:],
+        )
+        if not match:
+            break
+        name = match.group(1)
+        value = match.group(2) or match.group(3) or match.group(4) or ""
+        if name == SCOPE_ENV:
+            scope = value
+        elif name == PERMIT_ENV:
+            permit = value
+        else:
+            kept.append(match.group(0).strip())
+        pos += match.end()
+
+    rest = command[pos:].lstrip()
+    return " ".join(item for item in [*kept, rest] if item), scope, permit
+
+
+def permit_level_for_word(word: str, permit_words: dict[str, str]) -> str:
+    if not word:
+        return "none"
+    for level in ("deny", "weak_deny"):
+        configured = permit_words.get(level)
+        if configured and hmac.compare_digest(word.encode("utf-8"), configured.encode("utf-8")):
+            return level
+    return "none"
 
 
 def _string(value: Any, default: str) -> str:
