@@ -43,6 +43,7 @@ Risk categories:
 User permit changes only final authorization. Do not downgrade the risk category because a permit is present.
 If uncertain, use the higher-risk category.
 Judge this exact request only. Do not propose alternatives.
+Keep the reason to one short sentence.
 """
 
 OUTPUT_SCHEMA: dict[str, Any] = {
@@ -213,7 +214,7 @@ def final_decision(
         return Decision(
             "deny",
             (
-                f"{review.reason} Category {category} requires user scope and permit "
+                f"{review.reason} Category {category} requires an agent-written scope and user permit "
                 f"for {required_level}.{permit_retry_guidance(required_level, tool_name)}"
             ),
         )
@@ -231,13 +232,13 @@ def final_decision(
 
 def permit_retry_guidance(required_level: str, tool_name: str = "") -> str:
     base = (
-        f" Ask the user for the {required_level} permit word and a brief approval scope; "
-        "do not invent the permit word."
+        f" Write a brief approval scope yourself from the current task, then ask the user "
+        f"only for the {required_level} permit word; do not invent the permit word."
     )
     if tool_name == "Bash":
         return (
             f"{base} For Bash, retry by placing "
-            f'{SCOPE_ENV}="<scope>" {PERMIT_ENV}="<permit-word>" '
+            f'{SCOPE_ENV}="<agent-written-scope>" {PERMIT_ENV}="<user-provided-permit-word>" '
             "at the very start of the Bash command, before sudo, env, or the command."
         )
     return (

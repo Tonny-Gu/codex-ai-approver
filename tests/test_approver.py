@@ -106,13 +106,17 @@ class LlmParsingTests(unittest.TestCase):
         review = hook.parse_review('{"category":"deny","reason":"too broad"}')
         self.assertEqual(review, hook.ReviewResult("deny", "too broad"))
 
+    def test_reviewer_prompt_requires_short_reason(self) -> None:
+        self.assertIn("Keep the reason to one short sentence.", hook.DEVELOPER_INSTRUCTIONS)
+
 
 class FinalDecisionTests(unittest.TestCase):
     def test_weak_deny_requires_permit(self) -> None:
         review = hook.ReviewResult("weak_deny", "needs privileged read")
         decision = hook.final_decision(review, "none", "inspect logs", "Bash")
         self.assertEqual(decision.behavior, "deny")
-        self.assertIn("Ask the user for the weak_deny permit word", decision.message)
+        self.assertIn("ask the user only for the weak_deny permit word", decision.message)
+        self.assertIn("Write a brief approval scope yourself", decision.message)
         self.assertIn("CODEX_APPROVER_SCOPE", decision.message)
         self.assertIn("CODEX_APPROVER_PERMIT", decision.message)
         self.assertIn("very start of the Bash command", decision.message)
@@ -124,7 +128,8 @@ class FinalDecisionTests(unittest.TestCase):
         review = hook.ReviewResult("weak_deny", "needs privileged read")
         decision = hook.final_decision(review, "weak_deny", "", "Bash")
         self.assertEqual(decision.behavior, "deny")
-        self.assertIn("requires user scope", decision.message)
+        self.assertIn("requires an agent-written scope", decision.message)
+        self.assertIn("ask the user only for the weak_deny permit word", decision.message)
         self.assertIn("do not invent the permit word", decision.message)
 
     def test_non_bash_permit_denial_explains_supported_channel(self) -> None:
