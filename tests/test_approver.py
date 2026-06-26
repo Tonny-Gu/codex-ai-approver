@@ -2,20 +2,31 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest import mock
+import importlib.util
 import io
 import json
+import sys
 import tempfile
 import unittest
 
-from codex_ai_approver.config import load_config
-from codex_ai_approver.hook_io import parse_hook_input, extract_target
-from codex_ai_approver.hook_main import run_hook
-from codex_ai_approver.llm import LlmDecision, parse_decision
+
+def load_hook_module():
+    path = Path(__file__).resolve().parents[1] / "hooks" / "permission_request.py"
+    spec = importlib.util.spec_from_file_location("permission_request_hook", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"failed to load hook module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+hook = load_hook_module()
 
 
 class ConfigTests(unittest.TestCase):
     def test_defaults(self) -> None:
-        config = load_config(Path("/no/such/file"))
+        config = hook.load_config(Path("/no/such/file"))
         self.assertEqual(config.model, "gpt-5.5")
         self.assertEqual(config.reasoning_effort, "medium")
 
@@ -23,14 +34,14 @@ class ConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.yaml"
             path.write_text("model: gpt-5.4\nreasoning_effort: high\n", encoding="utf-8")
-            config = load_config(path)
+            config = hook.load_config(path)
         self.assertEqual(config.model, "gpt-5.4")
         self.assertEqual(config.reasoning_effort, "high")
 
 
 class HookInputTests(unittest.TestCase):
     def test_extracts_bash_command(self) -> None:
-        hook_input = parse_hook_input(
+        hook_input = hook.parse_hook_input(
             json.dumps(
                 {
                     "hook_event_name": "PermissionRequest",
@@ -45,10 +56,10 @@ class HookInputTests(unittest.TestCase):
             ),
             "PermissionRequest",
         )
-        self.assertEqual(extract_target(hook_input), "git status")
+        self.assertEqual(hook.extract_target(hook_input), "git status")
 
     def test_extracts_non_bash_payload(self) -> None:
-        hook_input = parse_hook_input(
+        hook_input = hook.parse_hook_input(
             json.dumps(
                 {
                     "hook_event_name": "PermissionRequest",
@@ -63,13 +74,13 @@ class HookInputTests(unittest.TestCase):
             ),
             "PermissionRequest",
         )
-        self.assertEqual(extract_target(hook_input), "*** Begin Patch\n*** End Patch\n")
+        self.assertEqual(hook.extract_target(hook_input), "*** Begin Patch\n*** End Patch\n")
 
 
 class LlmParsingTests(unittest.TestCase):
     def test_parse_json_decision(self) -> None:
-        decision = parse_decision('{"decision":"deny","reason":"too broad"}')
-        self.assertEqual(decision, LlmDecision("deny", "too broad"))
+        decision = hook.parse_decision('{"decision":"deny","reason":"too broad"}')
+        self.assertEqual(decision, hook.LlmDecision("deny", "too broad"))
 
 
 class HookMainTests(unittest.TestCase):
@@ -95,11 +106,12 @@ class HookMainTests(unittest.TestCase):
             with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout), mock.patch.dict(
                 "os.environ",
                 {"CODEX_AI_APPROVER_CONFIG": str(config_path)},
-            ), mock.patch(
-                "codex_ai_approver.hook_main.decide_with_codex",
-                return_value=LlmDecision("allow", "read-only"),
+            ), mock.patch.object(
+                hook,
+                "decide_with_codex",
+                return_value=hook.LlmDecision("allow", "read-only"),
             ):
-                code = run_hook("PermissionRequest")
+                code = hook.run_hook()
 
         self.assertEqual(code, 0)
         payload = json.loads(stdout.getvalue())

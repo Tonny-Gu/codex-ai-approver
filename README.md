@@ -1,6 +1,6 @@
 # Codex AI Approver
 
-Codex plugin that uses a Codex model to answer command approval requests from lifecycle hooks.
+Codex plugin that uses a Codex model to answer command approval requests from a single-file lifecycle hook.
 
 The plugin reads `~/.codex-ai-approver.yaml`. If the file is missing, defaults are:
 
