@@ -190,25 +190,60 @@ def parse_review(text: str) -> ReviewResult:
     return ReviewResult(category=category, reason=reason.strip())
 
 
-def final_decision(review: ReviewResult, permit_level: str, scope: str = "") -> Decision:
+def final_decision(
+    review: ReviewResult,
+    permit_level: str,
+    scope: str = "",
+    tool_name: str = "",
+) -> Decision:
     category = review.category
     if category == "allow":
         return Decision("allow", review.reason)
     if category == "strong_deny":
-        return Decision("deny", f"{review.reason} Category strong_deny cannot be permitted.")
+        return Decision(
+            "deny",
+            (
+                f"{review.reason} Category strong_deny cannot be permitted. "
+                "Do not ask the user for a permit word; choose a safer narrower alternative."
+            ),
+        )
 
     required_level = REQUIRED_PERMIT[category]
     if not scope.strip():
         return Decision(
             "deny",
-            f"{review.reason} Category {category} requires user scope and permit for {required_level}.",
+            (
+                f"{review.reason} Category {category} requires user scope and permit "
+                f"for {required_level}.{permit_retry_guidance(required_level, tool_name)}"
+            ),
         )
     if PERMIT_LEVELS.get(permit_level, 0) >= PERMIT_LEVELS[required_level]:
         return Decision("allow", review.reason)
 
     return Decision(
         "deny",
-        f"{review.reason} Category {category} requires user permit for {required_level}.",
+        (
+            f"{review.reason} Category {category} requires user permit for "
+            f"{required_level}.{permit_retry_guidance(required_level, tool_name)}"
+        ),
+    )
+
+
+def permit_retry_guidance(required_level: str, tool_name: str = "") -> str:
+    base = (
+        f" Ask the user for the {required_level} permit word and a brief approval scope; "
+        "do not invent the permit word."
+    )
+    if tool_name == "Bash":
+        return (
+            f"{base} For Bash, retry by placing "
+            f'{SCOPE_ENV}="<scope>" {PERMIT_ENV}="<permit-word>" '
+            "at the very start of the Bash command, before sudo, env, or the command."
+        )
+    return (
+        f"{base} Codex AI Approver only accepts scope and permit words through Bash "
+        f"command prefixes; do not attach {SCOPE_ENV} or {PERMIT_ENV} to non-Bash tools. "
+        "Ask the user to narrow the request or use a Bash equivalent when appropriate."
     )
 
 
@@ -230,7 +265,12 @@ def run_hook() -> int:
         config = load_config()
         hook_input = parse_hook_input(sys.stdin.read(), config)
         review = review_with_codex(hook_input, config)
-        decision = final_decision(review, hook_input.permit_level, hook_input.scope)
+        decision = final_decision(
+            review,
+            hook_input.permit_level,
+            hook_input.scope,
+            hook_input.tool_name,
+        )
         print_json(permission_request_output(decision.behavior, decision.message))
     except Exception as exc:
         return _handle_error(exc)
@@ -242,7 +282,11 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def _handle_error(exc: Exception) -> int:
-    reason = f"Codex AI Approver failed: {exc}"
+    reason = (
+        f"Codex AI Approver hook failed: {exc}. This is a hook setup/runtime failure, "
+        "not a safety denial. Do not retry the same tool call unchanged; ask the user "
+        "to fix the hook setup, dependency, Codex authentication, or config."
+    )
     try:
         print_json(permission_request_output("deny", reason))
         return 0

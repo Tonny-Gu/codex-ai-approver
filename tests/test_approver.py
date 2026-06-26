@@ -110,21 +110,37 @@ class LlmParsingTests(unittest.TestCase):
 class FinalDecisionTests(unittest.TestCase):
     def test_weak_deny_requires_permit(self) -> None:
         review = hook.ReviewResult("weak_deny", "needs privileged read")
-        self.assertEqual(hook.final_decision(review, "none", "inspect logs").behavior, "deny")
+        decision = hook.final_decision(review, "none", "inspect logs", "Bash")
+        self.assertEqual(decision.behavior, "deny")
+        self.assertIn("Ask the user for the weak_deny permit word", decision.message)
+        self.assertIn("CODEX_APPROVER_SCOPE", decision.message)
+        self.assertIn("CODEX_APPROVER_PERMIT", decision.message)
+        self.assertIn("very start of the Bash command", decision.message)
+        self.assertIn("before sudo", decision.message)
         self.assertEqual(hook.final_decision(review, "weak_deny", "inspect logs").behavior, "allow")
         self.assertEqual(hook.final_decision(review, "deny", "inspect logs").behavior, "allow")
 
     def test_permit_requires_scope(self) -> None:
         review = hook.ReviewResult("weak_deny", "needs privileged read")
-        decision = hook.final_decision(review, "weak_deny", "")
+        decision = hook.final_decision(review, "weak_deny", "", "Bash")
         self.assertEqual(decision.behavior, "deny")
         self.assertIn("requires user scope", decision.message)
+        self.assertIn("do not invent the permit word", decision.message)
+
+    def test_non_bash_permit_denial_explains_supported_channel(self) -> None:
+        review = hook.ReviewResult("deny", "writes outside workspace")
+        decision = hook.final_decision(review, "none", "", "apply_patch")
+        self.assertEqual(decision.behavior, "deny")
+        self.assertIn("only accepts scope and permit words through Bash", decision.message)
+        self.assertIn("do not attach CODEX_APPROVER_SCOPE", decision.message)
+        self.assertIn("narrow the request", decision.message)
 
     def test_strong_deny_cannot_be_permitted(self) -> None:
         review = hook.ReviewResult("strong_deny", "destructive")
         decision = hook.final_decision(review, "deny", "cleanup")
         self.assertEqual(decision.behavior, "deny")
         self.assertIn("cannot be permitted", decision.message)
+        self.assertIn("Do not ask the user for a permit word", decision.message)
 
 
 class HookMainTests(unittest.TestCase):
@@ -170,6 +186,10 @@ class HookMainTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         decision = payload["hookSpecificOutput"]["decision"]
         self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("Codex AI Approver hook failed", decision["message"])
+        self.assertIn("setup/runtime failure", decision["message"])
+        self.assertIn("not a safety denial", decision["message"])
+        self.assertIn("Do not retry the same tool call unchanged", decision["message"])
         self.assertIn("boom", decision["message"])
 
 
