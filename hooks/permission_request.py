@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import hmac
@@ -15,7 +16,11 @@ DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 PERMIT_ENV = "CODEX_APPROVER_PERMIT"
 SCOPE_ENV = "CODEX_APPROVER_SCOPE"
 PERMIT_LEVELS = {"none": 0, "weak_deny": 1, "deny": 2}
-RISK_CATEGORIES = {"allow", "weak_deny", "deny", "strong_deny"}
+REQUIRED_PERMIT = {"weak_deny": "weak_deny", "deny": "deny"}
+RISK_CATEGORIES = ("allow", "weak_deny", "deny", "strong_deny")
+ENV_ASSIGN_RE = re.compile(
+    r"""\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(\S+))"""
+)
 DEFAULT_CONFIG: dict[str, Any] = {
     "model": "gpt-5.5",
     "reasoning_effort": "medium",
@@ -46,7 +51,7 @@ OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "category": {
             "type": "string",
-            "enum": ["allow", "weak_deny", "deny", "strong_deny"],
+            "enum": list(RISK_CATEGORIES),
         },
         "reason": {"type": "string"},
     },
@@ -192,7 +197,7 @@ def final_decision(review: ReviewResult, permit_level: str, scope: str = "") -> 
     if category == "strong_deny":
         return Decision("deny", f"{review.reason} Category strong_deny cannot be permitted.")
 
-    required_level = "weak_deny" if category == "weak_deny" else "deny"
+    required_level = REQUIRED_PERMIT[category]
     if not scope.strip():
         return Decision(
             "deny",
@@ -208,17 +213,16 @@ def final_decision(review: ReviewResult, permit_level: str, scope: str = "") -> 
 
 
 def permission_request_output(decision: str, reason: str) -> dict[str, Any]:
-    body: dict[str, Any] = {
+    decision_payload: dict[str, Any] = {"behavior": decision}
+    if decision == "deny":
+        decision_payload["message"] = reason
+
+    return {
         "hookSpecificOutput": {
             "hookEventName": "PermissionRequest",
-            "decision": {
-                "behavior": decision,
-            },
+            "decision": decision_payload,
         },
     }
-    if decision == "deny":
-        body["hookSpecificOutput"]["decision"]["message"] = reason
-    return body
 
 
 def run_hook() -> int:
@@ -268,11 +272,7 @@ def _load_permit_words(value: Any) -> dict[str, str]:
 
 
 def default_config() -> dict[str, Any]:
-    return {
-        "model": DEFAULT_CONFIG["model"],
-        "reasoning_effort": DEFAULT_CONFIG["reasoning_effort"],
-        "permit_words": dict(DEFAULT_CONFIG["permit_words"]),
-    }
+    return deepcopy(DEFAULT_CONFIG)
 
 
 def merge_config(base: dict[str, Any], override: dict[str, Any]) -> None:
@@ -291,13 +291,7 @@ def parse_bash_controls(command: str) -> tuple[str, str, str]:
     permit = ""
     kept: list[str] = []
     pos = 0
-    while True:
-        match = re.match(
-            r"""\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(\S+))""",
-            command[pos:],
-        )
-        if not match:
-            break
+    while match := ENV_ASSIGN_RE.match(command, pos):
         name = match.group(1)
         value = match.group(2) or match.group(3) or match.group(4) or ""
         if name == SCOPE_ENV:
@@ -306,10 +300,10 @@ def parse_bash_controls(command: str) -> tuple[str, str, str]:
             permit = value
         else:
             kept.append(match.group(0).strip())
-        pos += match.end()
+        pos = match.end()
 
     rest = command[pos:].lstrip()
-    return " ".join(item for item in [*kept, rest] if item), scope, permit
+    return " ".join([*kept, rest]).strip(), scope, permit
 
 
 def permit_level_for_word(word: str, permit_words: dict[str, str]) -> str:
