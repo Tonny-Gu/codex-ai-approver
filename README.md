@@ -17,7 +17,6 @@ Optional keys:
 {
   "model": "gpt-5.5",
   "reasoning_effort": "medium",
-  "on_error": "deny",
   "debug": false
 }
 ```

@@ -6,7 +6,6 @@ from pathlib import Path
 from typing import Any
 import json
 import os
-import re
 import sys
 import traceback
 
@@ -14,7 +13,6 @@ import traceback
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "medium"
-VALID_ERROR_POLICIES = {"deny", "allow"}
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -31,22 +29,14 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 class ApproverConfig:
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
-    on_error: str = "deny"
     debug: bool = False
 
 
 @dataclass(frozen=True)
 class HookInput:
-    event_name: str
-    session_id: str
-    turn_id: str
     cwd: str
-    model: str
-    permission_mode: str
     tool_name: str
     tool_input: dict[str, Any]
-    transcript_path: str | None = None
-    tool_use_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,19 +61,15 @@ def load_config(path: Path | None = None) -> ApproverConfig:
         payload.get("reasoning_effort", payload.get("model_reasoning_effort")),
         DEFAULT_REASONING_EFFORT,
     )
-    on_error = _as_str(payload.get("on_error"), "deny").lower()
-    if on_error not in VALID_ERROR_POLICIES:
-        on_error = "deny"
 
     return ApproverConfig(
         model=model,
         reasoning_effort=reasoning_effort,
-        on_error=on_error,
         debug=_as_bool(payload.get("debug"), False),
     )
 
 
-def parse_hook_input(stdin_data: str, expected_event: str = "PermissionRequest") -> HookInput:
+def parse_hook_input(stdin_data: str) -> HookInput:
     raw = json.loads(stdin_data)
     if not isinstance(raw, dict):
         raise ValueError("hook input must be a JSON object")
@@ -93,16 +79,9 @@ def parse_hook_input(stdin_data: str, expected_event: str = "PermissionRequest")
         raise ValueError("hook input field tool_input must be an object")
 
     return HookInput(
-        event_name=_string(raw.get("hook_event_name"), expected_event),
-        session_id=_string(raw.get("session_id"), "unknown"),
-        turn_id=_string(raw.get("turn_id"), "unknown"),
         cwd=_string(raw.get("cwd"), ""),
-        model=_string(raw.get("model"), ""),
-        permission_mode=_string(raw.get("permission_mode"), ""),
         tool_name=_string(raw.get("tool_name"), ""),
         tool_input=tool_input,
-        transcript_path=_optional_string(raw.get("transcript_path")),
-        tool_use_id=_optional_string(raw.get("tool_use_id")),
     )
 
 
@@ -119,34 +98,20 @@ def extract_target(hook_input: HookInput) -> str:
 def build_prompt(hook_input: HookInput) -> str:
     target = extract_target(hook_input)
     tool_input_json = json.dumps(hook_input.tool_input, indent=2, sort_keys=True)
-    transcript_note = ""
-    if hook_input.transcript_path:
-        transcript_note = (
-            "\nTranscript path is available to the host agent, but do not read it. "
-            f"Path: {hook_input.transcript_path}\n"
-        )
 
     return f"""You are deciding whether Codex should be permitted to run one proposed tool call.
 
-Return only JSON matching this schema:
-{{"decision":"allow"|"deny","reason":"short reason"}}
-
 Decision policy:
-- Allow only when the requested action is clearly scoped to the current task, low risk, and reversible or read-only.
-- Deny destructive commands, broad deletes, forceful git history changes, privilege escalation, credential or secret access, persistence changes outside the working directory, and commands whose purpose or blast radius is unclear.
-- Deny network, package installation, remote execution, service control, filesystem permission changes, and writes outside the working directory unless the tool input makes the safety and necessity explicit.
-- If uncertain, deny. Do not ask the user and do not return any value other than allow or deny.
+- Allow only clearly scoped, low-risk, reversible, or read-only actions.
+- Deny destructive commands, broad deletes, forced git history changes, privilege escalation, secret access, persistence changes, and unclear blast radius.
+- Deny network, package installation, remote execution, service control, permission changes, and writes outside the working directory unless the input makes safety and necessity explicit.
+- If uncertain, deny.
 - Judge this exact command only. Do not propose alternatives.
 
-Hook event: {hook_input.event_name}
-Session: {hook_input.session_id}
-Turn: {hook_input.turn_id}
 Working directory: {hook_input.cwd or "unknown"}
-Current Codex model: {hook_input.model or "unknown"}
-Permission mode: {hook_input.permission_mode or "unknown"}
 Tool: {hook_input.tool_name}
 Target: {target}
-{transcript_note}
+
 Tool input JSON:
 {tool_input_json}
 """
@@ -162,8 +127,7 @@ def decide_with_codex(hook_input: HookInput, config: ApproverConfig) -> LlmDecis
     prompt = build_prompt(hook_input)
     effort = ReasoningEffort(config.reasoning_effort)
     developer_instructions = (
-        "You are a command approval classifier. Do not inspect files, do not run "
-        "tools, and do not continue beyond the requested JSON decision."
+        "Classify one permission request. Do not inspect files or run tools."
     )
 
     with Codex() as codex:
@@ -186,7 +150,9 @@ def decide_with_codex(hook_input: HookInput, config: ApproverConfig) -> LlmDecis
 
 
 def parse_decision(text: str) -> LlmDecision:
-    payload = _parse_json_object(text)
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("LLM response must be a JSON object")
     decision = payload.get("decision")
     reason = payload.get("reason")
     if decision not in {"allow", "deny"}:
@@ -235,9 +201,6 @@ def _handle_error(exc: Exception) -> int:
     if config is not None and config.debug:
         reason = f"{reason}\n{traceback.format_exc()}"
 
-    if config is not None and config.on_error == "allow":
-        return 0
-
     print_json(permission_request_output("deny", reason))
     return 0
 
@@ -250,29 +213,10 @@ def _load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def _parse_json_object(text: str) -> dict[str, Any]:
-    try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            raise
-        value = json.loads(match.group(0))
-    if not isinstance(value, dict):
-        raise ValueError("LLM response must be a JSON object")
-    return value
-
-
 def _string(value: Any, default: str) -> str:
     if isinstance(value, str):
         return value
     return default
-
-
-def _optional_string(value: Any) -> str | None:
-    if isinstance(value, str) and value:
-        return value
-    return None
 
 
 def _as_str(value: Any, default: str) -> str:

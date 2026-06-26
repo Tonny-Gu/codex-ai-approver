@@ -48,16 +48,12 @@ class HookInputTests(unittest.TestCase):
             json.dumps(
                 {
                     "hook_event_name": "PermissionRequest",
-                    "session_id": "s",
-                    "turn_id": "t",
                     "cwd": "/repo",
                     "model": "gpt",
-                    "permission_mode": "default",
                     "tool_name": "Bash",
                     "tool_input": {"command": "git status"},
                 }
-            ),
-            "PermissionRequest",
+            )
         )
         self.assertEqual(hook.extract_target(hook_input), "git status")
 
@@ -66,16 +62,12 @@ class HookInputTests(unittest.TestCase):
             json.dumps(
                 {
                     "hook_event_name": "PermissionRequest",
-                    "session_id": "s",
-                    "turn_id": "t",
                     "cwd": "/repo",
                     "model": "gpt",
-                    "permission_mode": "default",
                     "tool_name": "apply_patch",
                     "tool_input": {"command": "*** Begin Patch\n*** End Patch\n"},
                 }
-            ),
-            "PermissionRequest",
+            )
         )
         self.assertEqual(hook.extract_target(hook_input), "*** Begin Patch\n*** End Patch\n")
 
@@ -92,11 +84,8 @@ class HookMainTests(unittest.TestCase):
             json.dumps(
                 {
                     "hook_event_name": "PermissionRequest",
-                    "session_id": "s",
-                    "turn_id": "t",
                     "cwd": "/repo",
                     "model": "gpt",
-                    "permission_mode": "default",
                     "tool_name": "Bash",
                     "tool_input": {"command": "git status"},
                 }
