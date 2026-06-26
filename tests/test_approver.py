@@ -29,6 +29,7 @@ class ConfigTests(unittest.TestCase):
         config = hook.load_config(Path("/no/such/file"))
         self.assertEqual(config.model, "gpt-5.5")
         self.assertEqual(config.reasoning_effort, "medium")
+        self.assertEqual(config.permit_words, {"weak_deny": "weak_deny", "deny": "deny"})
 
     def test_reads_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -45,10 +46,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.reasoning_effort, "high")
         self.assertEqual(config.permit_words, {"weak_deny": "weak", "deny": "higher"})
 
+    def test_partial_permit_words_override_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text('{"permit_words":{"weak_deny":"custom"}}\n', encoding="utf-8")
+            config = hook.load_config(path)
+        self.assertEqual(config.permit_words, {"weak_deny": "custom", "deny": "deny"})
+
 
 class HookInputTests(unittest.TestCase):
     def test_parses_hook_input(self) -> None:
-        config = hook.ApproverConfig(permit_words={"weak_deny": "secret-token"})
+        config = hook.ApproverConfig(
+            model="gpt-5.5",
+            reasoning_effort="medium",
+            permit_words={"weak_deny": "secret-token", "deny": "deny"},
+        )
         hook_input = hook.parse_hook_input(
             json.dumps(
                 {
@@ -71,6 +83,23 @@ class HookInputTests(unittest.TestCase):
         self.assertEqual(hook_input.permit_level, "weak_deny")
         self.assertNotIn("secret-token", hook.build_prompt(hook_input))
 
+    def test_uses_default_permit_words(self) -> None:
+        hook_input = hook.parse_hook_input(
+            json.dumps(
+                {
+                    "cwd": "/repo",
+                    "tool_name": "Bash",
+                    "tool_input": {
+                        "command": (
+                            'CODEX_APPROVER_SCOPE="inspect logs" '
+                            "CODEX_APPROVER_PERMIT=weak_deny git status"
+                        )
+                    },
+                }
+            )
+        )
+        self.assertEqual(hook_input.permit_level, "weak_deny")
+
 
 class LlmParsingTests(unittest.TestCase):
     def test_parse_json_review(self) -> None:
@@ -81,13 +110,19 @@ class LlmParsingTests(unittest.TestCase):
 class FinalDecisionTests(unittest.TestCase):
     def test_weak_deny_requires_permit(self) -> None:
         review = hook.ReviewResult("weak_deny", "needs privileged read")
-        self.assertEqual(hook.final_decision(review, "none").behavior, "deny")
-        self.assertEqual(hook.final_decision(review, "weak_deny").behavior, "allow")
-        self.assertEqual(hook.final_decision(review, "deny").behavior, "allow")
+        self.assertEqual(hook.final_decision(review, "none", "inspect logs").behavior, "deny")
+        self.assertEqual(hook.final_decision(review, "weak_deny", "inspect logs").behavior, "allow")
+        self.assertEqual(hook.final_decision(review, "deny", "inspect logs").behavior, "allow")
+
+    def test_permit_requires_scope(self) -> None:
+        review = hook.ReviewResult("weak_deny", "needs privileged read")
+        decision = hook.final_decision(review, "weak_deny", "")
+        self.assertEqual(decision.behavior, "deny")
+        self.assertIn("requires user scope", decision.message)
 
     def test_strong_deny_cannot_be_permitted(self) -> None:
         review = hook.ReviewResult("strong_deny", "destructive")
-        decision = hook.final_decision(review, "deny")
+        decision = hook.final_decision(review, "deny", "cleanup")
         self.assertEqual(decision.behavior, "deny")
         self.assertIn("cannot be permitted", decision.message)
 

@@ -7,7 +7,11 @@ The plugin reads `~/.codex-ai-approver.json`. If the file is missing, defaults a
 ```json
 {
   "model": "gpt-5.5",
-  "reasoning_effort": "medium"
+  "reasoning_effort": "medium",
+  "permit_words": {
+    "weak_deny": "weak_deny",
+    "deny": "deny"
+  }
 }
 ```
 
@@ -29,7 +33,7 @@ The plugin only registers `PermissionRequest` and answers Codex approval prompts
 For Bash approvals, a command can pass user context with prefix variables:
 
 ```bash
-CODEX_APPROVER_SCOPE="inspect service logs" CODEX_APPROVER_PERMIT="word-for-weak-risk" sudo journalctl -u app
+CODEX_APPROVER_SCOPE="inspect service logs" CODEX_APPROVER_PERMIT="weak_deny" sudo journalctl -u app
 ```
 
 The permit word is verified locally and stripped before the command is sent to the model. The model classifies risk as `allow`, `weak_deny`, `deny`, or `strong_deny`; the hook then applies the permit level. `strong_deny` cannot be permitted.

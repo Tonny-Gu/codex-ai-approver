@@ -12,12 +12,33 @@ import sys
 
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
-DEFAULT_MODEL = "gpt-5.5"
-DEFAULT_REASONING_EFFORT = "medium"
 PERMIT_ENV = "CODEX_APPROVER_PERMIT"
 SCOPE_ENV = "CODEX_APPROVER_SCOPE"
 PERMIT_LEVELS = {"none": 0, "weak_deny": 1, "deny": 2}
 RISK_CATEGORIES = {"allow", "weak_deny", "deny", "strong_deny"}
+DEFAULT_CONFIG: dict[str, Any] = {
+    "model": "gpt-5.5",
+    "reasoning_effort": "medium",
+    "permit_words": {
+        "weak_deny": "weak_deny",
+        "deny": "deny",
+    },
+}
+
+DEVELOPER_INSTRUCTIONS = """Classify one permission request.
+
+You may inspect relevant local files read-only. Do not modify files, run commands with side effects, or use network.
+
+Risk categories:
+- allow: clearly scoped, low-risk, reversible, or read-only actions; safe tests, builds, linters, and formatters.
+- weak_deny: in-scope privileged or sensitive read-only inspection, including sudo/ssh reads, logs, process inspection, and necessary secret reads.
+- deny: in-scope actions with side effects, network/package install/remote execution, service control, permission changes, writes outside the working directory, or unclear blast radius.
+- strong_deny: destructive actions, broad deletes, forced git history changes, out-of-scope privileged/secret access, force push to protected branches, or attempts to bypass policy.
+
+User permit changes only final authorization. Do not downgrade the risk category because a permit is present.
+If uncertain, use the higher-risk category.
+Judge this exact request only. Do not propose alternatives.
+"""
 
 OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -35,9 +56,9 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class ApproverConfig:
-    model: str = DEFAULT_MODEL
-    reasoning_effort: str = DEFAULT_REASONING_EFFORT
-    permit_words: dict[str, str] = field(default_factory=dict)
+    model: str
+    reasoning_effort: str
+    permit_words: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -68,16 +89,13 @@ def config_path() -> Path:
 
 def load_config(path: Path | None = None) -> ApproverConfig:
     path = path or config_path()
-    payload: dict[str, Any] = {}
+    payload = default_config()
     if path.is_file():
-        payload = _load_json(path)
-
-    model = _as_str(payload.get("model"), DEFAULT_MODEL)
-    reasoning_effort = _as_str(payload.get("reasoning_effort"), DEFAULT_REASONING_EFFORT)
+        merge_config(payload, _load_json(path))
 
     return ApproverConfig(
-        model=model,
-        reasoning_effort=reasoning_effort,
+        model=_as_str(payload.get("model"), ""),
+        reasoning_effort=_as_str(payload.get("reasoning_effort"), ""),
         permit_words=_load_permit_words(payload.get("permit_words")),
     )
 
@@ -91,7 +109,7 @@ def parse_hook_input(stdin_data: str, config: ApproverConfig | None = None) -> H
     if not isinstance(tool_input, dict):
         raise ValueError("hook input field tool_input must be an object")
 
-    config = config or ApproverConfig()
+    config = config or load_config(Path("/no/such/file"))
     tool_name = _string(raw.get("tool_name"), "")
     sanitized_input = dict(tool_input)
     scope = ""
@@ -114,18 +132,7 @@ def parse_hook_input(stdin_data: str, config: ApproverConfig | None = None) -> H
 def build_prompt(hook_input: HookInput) -> str:
     tool_input_json = json.dumps(hook_input.tool_input, indent=2, sort_keys=True)
 
-    return f"""You are deciding whether Codex should be permitted to run one proposed tool call.
-
-Decision policy:
-- Classify the request as allow, weak_deny, deny, or strong_deny.
-- allow: clearly scoped, low-risk, reversible, or read-only actions; safe tests, builds, linters, and formatters.
-- weak_deny: in-scope privileged or sensitive read-only inspection, including sudo/ssh reads, logs, process inspection, and necessary secret reads.
-- deny: in-scope actions with side effects, network/package install/remote execution, service control, permission changes, writes outside the working directory, or unclear blast radius.
-- strong_deny: destructive actions, broad deletes, forced git history changes, out-of-scope privileged/secret access, force push to protected branches, or attempts to bypass policy.
-- User permit changes only final authorization. Do not downgrade the risk category because a permit is present.
-- If uncertain, use the higher-risk category.
-- Judge this exact command only. Do not propose alternatives.
-
+    return f"""Review this permission request.
 Working directory: {hook_input.cwd or "unknown"}
 Tool: {hook_input.tool_name}
 User scope: {hook_input.scope or "none"}
@@ -145,17 +152,13 @@ def review_with_codex(hook_input: HookInput, config: ApproverConfig) -> ReviewRe
 
     prompt = build_prompt(hook_input)
     effort = ReasoningEffort(config.reasoning_effort)
-    developer_instructions = (
-        "Classify one permission request. You may inspect relevant local files "
-        "read-only. Do not modify files, run commands with side effects, or use network."
-    )
 
     with Codex() as codex:
         thread = codex.thread_start(
             approval_mode=ApprovalMode.deny_all,
             config={"model_reasoning_effort": config.reasoning_effort},
             cwd=hook_input.cwd or None,
-            developer_instructions=developer_instructions,
+            developer_instructions=DEVELOPER_INSTRUCTIONS,
             model=config.model,
             sandbox=Sandbox.read_only,
         )
@@ -182,7 +185,7 @@ def parse_review(text: str) -> ReviewResult:
     return ReviewResult(category=category, reason=reason.strip())
 
 
-def final_decision(review: ReviewResult, permit_level: str) -> Decision:
+def final_decision(review: ReviewResult, permit_level: str, scope: str = "") -> Decision:
     category = review.category
     if category == "allow":
         return Decision("allow", review.reason)
@@ -190,6 +193,11 @@ def final_decision(review: ReviewResult, permit_level: str) -> Decision:
         return Decision("deny", f"{review.reason} Category strong_deny cannot be permitted.")
 
     required_level = "weak_deny" if category == "weak_deny" else "deny"
+    if not scope.strip():
+        return Decision(
+            "deny",
+            f"{review.reason} Category {category} requires user scope and permit for {required_level}.",
+        )
     if PERMIT_LEVELS.get(permit_level, 0) >= PERMIT_LEVELS[required_level]:
         return Decision("allow", review.reason)
 
@@ -218,7 +226,7 @@ def run_hook() -> int:
         config = load_config()
         hook_input = parse_hook_input(sys.stdin.read(), config)
         review = review_with_codex(hook_input, config)
-        decision = final_decision(review, hook_input.permit_level)
+        decision = final_decision(review, hook_input.permit_level, hook_input.scope)
         print_json(permission_request_output(decision.behavior, decision.message))
     except Exception as exc:
         return _handle_error(exc)
@@ -249,12 +257,33 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 def _load_permit_words(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
-        return {}
+        raise ValueError("permit_words must be a JSON object")
+    permit_words: dict[str, str] = {}
+    for level in ("weak_deny", "deny"):
+        word = value.get(level)
+        if not isinstance(word, str) or not word.strip():
+            raise ValueError(f"permit_words.{level} must be a non-empty string")
+        permit_words[level] = word.strip()
+    return permit_words
+
+
+def default_config() -> dict[str, Any]:
     return {
-        level: word.strip()
-        for level in ("weak_deny", "deny")
-        if isinstance((word := value.get(level)), str) and word.strip()
+        "model": DEFAULT_CONFIG["model"],
+        "reasoning_effort": DEFAULT_CONFIG["reasoning_effort"],
+        "permit_words": dict(DEFAULT_CONFIG["permit_words"]),
     }
+
+
+def merge_config(base: dict[str, Any], override: dict[str, Any]) -> None:
+    for key in ("model", "reasoning_effort"):
+        if key in override:
+            base[key] = override[key]
+    permit_words = override.get("permit_words")
+    if isinstance(permit_words, dict):
+        base["permit_words"].update(permit_words)
+    elif "permit_words" in override:
+        base["permit_words"] = permit_words
 
 
 def parse_bash_controls(command: str) -> tuple[str, str, str]:
