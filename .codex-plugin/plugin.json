@@ -1,0 +1,28 @@
+{
+  "name": "codex-ai-approver",
+  "version": "0.1.0",
+  "description": "LLM-backed Codex hook that answers command permission requests.",
+  "author": {
+    "name": "Local developer"
+  },
+  "interface": {
+    "displayName": "Codex AI Approver",
+    "shortDescription": "Use a Codex model to review command approvals.",
+    "longDescription": "Codex AI Approver bundles lifecycle hooks that ask a configured Codex model whether a command should be allowed or denied.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Hooks",
+      "Automation"
+    ],
+    "defaultPrompt": [
+      "Use Codex AI Approver for command permissions."
+    ]
+  },
+  "keywords": [
+    "hooks",
+    "approval",
+    "permissions"
+  ],
+  "license": "MIT"
+}

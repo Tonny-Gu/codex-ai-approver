@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 ${PLUGIN_ROOT}/hooks/permission_request.py",
+            "timeout": 600,
+            "statusMessage": "Answering permission request with Codex"
+          }
+        ]
+      }
+    ]
+  }
+}
