@@ -3,14 +3,13 @@ from __future__ import annotations
 import sys
 import traceback
 
-from .cache import read_cached_decision, write_cached_decision
 from .config import load_config
 from .hook_io import (
     parse_hook_input,
     permission_request_output,
     print_json,
 )
-from .llm import LlmDecision, decide_with_codex
+from .llm import decide_with_codex
 
 
 def run_hook(event_name: str) -> int:
@@ -19,12 +18,7 @@ def run_hook(event_name: str) -> int:
         config = load_config()
         hook_input = parse_hook_input(stdin_data, event_name)
 
-        cached = read_cached_decision(hook_input, config.cache_ttl_sec)
-        if cached is not None:
-            decision = LlmDecision(cached.decision, cached.reason)
-        else:
-            decision = decide_with_codex(hook_input, config)
-            write_cached_decision(hook_input, decision.decision, decision.reason)
+        decision = decide_with_codex(hook_input, config)
 
         if event_name == "PermissionRequest":
             print_json(permission_request_output(decision.decision, decision.reason))

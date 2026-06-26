@@ -15,7 +15,6 @@ Optional keys:
 model: gpt-5.5
 reasoning_effort: medium
 on_error: deny
-cache_ttl_sec: 300
 debug: false
 ```
 

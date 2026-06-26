@@ -91,10 +91,10 @@ class HookMainTests(unittest.TestCase):
         stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.yaml"
-            config_path.write_text("cache_ttl_sec: 0\n", encoding="utf-8")
+            config_path.write_text("", encoding="utf-8")
             with mock.patch("sys.stdin", stdin), mock.patch("sys.stdout", stdout), mock.patch.dict(
                 "os.environ",
-                {"CODEX_AI_APPROVER_CONFIG": str(config_path), "PLUGIN_DATA": tmp},
+                {"CODEX_AI_APPROVER_CONFIG": str(config_path)},
             ), mock.patch(
                 "codex_ai_approver.hook_main.decide_with_codex",
                 return_value=LlmDecision("allow", "read-only"),

@@ -14,7 +14,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only without PyYAML.
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.yaml"
 DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_REASONING_EFFORT = "medium"
-VALID_DECISIONS = {"allow", "deny"}
 VALID_ERROR_POLICIES = {"deny", "allow"}
 
 
@@ -23,7 +22,6 @@ class ApproverConfig:
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
     on_error: str = "deny"
-    cache_ttl_sec: int = 300
     debug: bool = False
 
 
@@ -51,7 +49,6 @@ def load_config(path: Path | None = None) -> ApproverConfig:
         model=model,
         reasoning_effort=reasoning_effort,
         on_error=on_error,
-        cache_ttl_sec=_as_int(payload.get("cache_ttl_sec"), 300),
         debug=_as_bool(payload.get("debug"), False),
     )
 
@@ -69,20 +66,6 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 def _as_str(value: Any, default: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
-    return default
-
-
-def _as_int(value: Any, default: int) -> int:
-    if isinstance(value, bool):
-        return default
-    if isinstance(value, int) and value >= 0:
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = int(value.strip())
-        except ValueError:
-            return default
-        return parsed if parsed >= 0 else default
     return default
 
 
