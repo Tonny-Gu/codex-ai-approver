@@ -2,6 +2,30 @@
 
 Codex plugin that uses a Codex model to answer command approval requests from a single-file lifecycle hook.
 
+## Install from GitHub marketplace
+
+Add this repository as a Codex plugin marketplace, list available plugins, then install the plugin:
+
+```bash
+codex plugin marketplace add owner/codex-ai-approver --ref main
+codex plugin list --available
+codex plugin add codex-ai-approver@<marketplace-name>
+```
+
+Replace `owner` with the GitHub owner for the repository. If you are unsure what marketplace name Codex assigned, run:
+
+```bash
+codex plugin marketplace list
+```
+
+This marketplace declares the name `codex-ai-approver`, so the install command is usually:
+
+```bash
+codex plugin add codex-ai-approver@codex-ai-approver
+```
+
+After installing, start a new Codex thread or restart Codex. Because this plugin registers a command hook, open `/hooks` and trust the new hook if Codex asks for review.
+
 The plugin reads `~/.codex-ai-approver.json`. If the file is missing, defaults are:
 
 ```json
