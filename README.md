@@ -16,8 +16,7 @@ Optional keys:
 ```json
 {
   "model": "gpt-5.5",
-  "reasoning_effort": "medium",
-  "debug": false
+  "reasoning_effort": "medium"
 }
 ```
 

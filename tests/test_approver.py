@@ -43,33 +43,19 @@ class ConfigTests(unittest.TestCase):
 
 
 class HookInputTests(unittest.TestCase):
-    def test_extracts_bash_command(self) -> None:
+    def test_parses_hook_input(self) -> None:
         hook_input = hook.parse_hook_input(
             json.dumps(
                 {
-                    "hook_event_name": "PermissionRequest",
                     "cwd": "/repo",
-                    "model": "gpt",
                     "tool_name": "Bash",
                     "tool_input": {"command": "git status"},
                 }
             )
         )
-        self.assertEqual(hook.extract_target(hook_input), "git status")
-
-    def test_extracts_non_bash_payload(self) -> None:
-        hook_input = hook.parse_hook_input(
-            json.dumps(
-                {
-                    "hook_event_name": "PermissionRequest",
-                    "cwd": "/repo",
-                    "model": "gpt",
-                    "tool_name": "apply_patch",
-                    "tool_input": {"command": "*** Begin Patch\n*** End Patch\n"},
-                }
-            )
-        )
-        self.assertEqual(hook.extract_target(hook_input), "*** Begin Patch\n*** End Patch\n")
+        self.assertEqual(hook_input.cwd, "/repo")
+        self.assertEqual(hook_input.tool_name, "Bash")
+        self.assertEqual(hook_input.tool_input, {"command": "git status"})
 
 
 class LlmParsingTests(unittest.TestCase):
@@ -83,9 +69,7 @@ class HookMainTests(unittest.TestCase):
         stdin = io.StringIO(
             json.dumps(
                 {
-                    "hook_event_name": "PermissionRequest",
                     "cwd": "/repo",
-                    "model": "gpt",
                     "tool_name": "Bash",
                     "tool_input": {"command": "git status"},
                 }
@@ -109,6 +93,21 @@ class HookMainTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         decision = payload["hookSpecificOutput"]["decision"]
         self.assertEqual(decision["behavior"], "allow")
+
+    def test_permission_request_outputs_deny_on_error(self) -> None:
+        stdout = io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO("{}")), mock.patch("sys.stdout", stdout), mock.patch.object(
+            hook,
+            "decide_with_codex",
+            side_effect=RuntimeError("boom"),
+        ):
+            code = hook.run_hook()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        decision = payload["hookSpecificOutput"]["decision"]
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("boom", decision["message"])
 
 
 if __name__ == "__main__":

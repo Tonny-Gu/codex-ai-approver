@@ -7,7 +7,6 @@ from typing import Any
 import json
 import os
 import sys
-import traceback
 
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
@@ -29,7 +28,6 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 class ApproverConfig:
     model: str = DEFAULT_MODEL
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
-    debug: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,15 +55,11 @@ def load_config(path: Path | None = None) -> ApproverConfig:
         payload = _load_json(path)
 
     model = _as_str(payload.get("model"), DEFAULT_MODEL)
-    reasoning_effort = _as_str(
-        payload.get("reasoning_effort", payload.get("model_reasoning_effort")),
-        DEFAULT_REASONING_EFFORT,
-    )
+    reasoning_effort = _as_str(payload.get("reasoning_effort"), DEFAULT_REASONING_EFFORT)
 
     return ApproverConfig(
         model=model,
         reasoning_effort=reasoning_effort,
-        debug=_as_bool(payload.get("debug"), False),
     )
 
 
@@ -85,18 +79,7 @@ def parse_hook_input(stdin_data: str) -> HookInput:
     )
 
 
-def extract_target(hook_input: HookInput) -> str:
-    tool = hook_input.tool_name
-    payload = hook_input.tool_input
-    if tool == "Bash":
-        return _string(payload.get("command"), "")
-    if tool in {"apply_patch", "Edit", "Write"}:
-        return _string(payload.get("command"), "") or json.dumps(payload, sort_keys=True)
-    return json.dumps(payload, sort_keys=True)
-
-
 def build_prompt(hook_input: HookInput) -> str:
-    target = extract_target(hook_input)
     tool_input_json = json.dumps(hook_input.tool_input, indent=2, sort_keys=True)
 
     return f"""You are deciding whether Codex should be permitted to run one proposed tool call.
@@ -110,7 +93,6 @@ Decision policy:
 
 Working directory: {hook_input.cwd or "unknown"}
 Tool: {hook_input.tool_name}
-Target: {target}
 
 Tool input JSON:
 {tool_input_json}
@@ -192,17 +174,13 @@ def print_json(payload: dict[str, Any]) -> None:
 
 
 def _handle_error(exc: Exception) -> int:
-    try:
-        config = load_config()
-    except Exception:
-        config = None
-
     reason = f"Codex AI Approver failed: {exc}"
-    if config is not None and config.debug:
-        reason = f"{reason}\n{traceback.format_exc()}"
-
-    print_json(permission_request_output("deny", reason))
-    return 0
+    try:
+        print_json(permission_request_output("deny", reason))
+        return 0
+    except Exception:
+        print(reason, file=sys.stderr)
+        return 2
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -222,18 +200,6 @@ def _string(value: Any, default: str) -> str:
 def _as_str(value: Any, default: str) -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
-    return default
-
-
-def _as_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on", "enable", "enabled"}:
-            return True
-        if lowered in {"0", "false", "no", "off", "disable", "disabled"}:
-            return False
     return default
 
 
