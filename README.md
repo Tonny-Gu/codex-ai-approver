@@ -90,12 +90,7 @@ CODEX_APPROVER_SCOPE="inspect service logs" CODEX_APPROVER_PERMIT="weak_deny" su
 
 The variables must be placed at the very start of the Bash command, before `sudo`, `env`, or the actual command. The hook parses these prefixes, verifies the permit word locally, and removes the permit word from the prompt sent to the reviewer model.
 
-The permit word is not something the agent should invent. If the hook denies a request because scope or permit is missing, the agent should ask the user for:
-
-- a brief approval scope
-- the required permit word
-
-Then the agent can retry the Bash command with the prefix variables.
+The permit word is not something the agent should invent. If the hook denies a request because scope or permit is missing, the agent should write a brief scope from the current task, ask the user only for the required permit word, then retry the Bash command with the prefix variables.
 
 ## Non-Bash Requests
 
@@ -111,6 +106,14 @@ The hook reads `~/.codex-ai-approver.json`. If the file is missing, these defaul
 {
   "model": "gpt-5.5",
   "reasoning_effort": "medium",
+  "daemon": {
+    "enabled": true,
+    "socket_path": "",
+    "startup_timeout_seconds": 30,
+    "request_timeout_seconds": 120,
+    "idle_timeout_seconds": 1800,
+    "max_requests_per_thread": 100
+  },
   "permit_words": {
     "weak_deny": "weak_deny",
     "deny": "deny"
@@ -124,6 +127,10 @@ Example custom config:
 {
   "model": "gpt-5.5",
   "reasoning_effort": "medium",
+  "daemon": {
+    "enabled": true,
+    "max_requests_per_thread": 100
+  },
   "permit_words": {
     "weak_deny": "word-for-weak-risk",
     "deny": "word-for-higher-risk"
@@ -137,6 +144,33 @@ You can override the config path by setting this in the environment where Codex 
 CODEX_AI_APPROVER_CONFIG=/path/to/config.json
 ```
 
+## Long-Lived Daemon
+
+By default, the hook starts a detached local daemon and sends each permission payload over a Unix socket. The daemon keeps one Codex client and one warmed reviewer thread alive, runs each classification turn, then calls `thread/rollback` so the request history does not grow.
+
+Default socket paths:
+
+- `$XDG_RUNTIME_DIR/codex-ai-approver/daemon.sock` when `XDG_RUNTIME_DIR` is set.
+- `~/.codex-ai-approver/run/daemon.sock` otherwise.
+
+Manual controls:
+
+```bash
+python3 hooks/permission_request.py --daemon-status
+python3 hooks/permission_request.py --daemon-start
+python3 hooks/permission_request.py --daemon-stop
+```
+
+To disable the daemon and make every hook invocation create a fresh Codex reviewer process, set:
+
+```json
+{
+  "daemon": {
+    "enabled": false
+  }
+}
+```
+
 ## Failure Behavior
 
 If the hook itself fails, it denies the permission request and tells the agent that this is a hook setup/runtime failure, not a safety denial. Typical causes include:
@@ -145,6 +179,7 @@ If the hook itself fails, it denies the permission request and tells the agent t
 - Codex authentication is unavailable to the local SDK runtime.
 - The config file is invalid JSON or has invalid `permit_words`.
 - The configured model or reasoning effort is invalid.
+- The local approver daemon cannot start, respond, or return a valid review.
 - The reviewer response cannot be parsed.
 
 In these cases, the agent should not retry the same tool call unchanged. Fix the hook setup, dependency, authentication, or config first.
