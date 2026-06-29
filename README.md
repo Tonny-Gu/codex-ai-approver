@@ -138,6 +138,8 @@ CODEX_AI_APPROVER_CONFIG=/path/to/config.json
 
 By default, the hook starts a detached local daemon and sends each permission payload over XML-RPC on `localhost:47678`. The daemon keeps one Codex client and one warmed reviewer thread alive, runs each classification turn, then calls `thread/rollback` so the request history does not grow.
 
+Stop the daemon manually with `python3 hooks/permission_request.py --daemon-stop`.
+
 ## Failure Behavior
 
 If the hook itself fails, it denies the permission request and tells the agent that this is a hook setup/runtime failure, not a safety denial. Typical causes include:

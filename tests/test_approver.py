@@ -148,6 +148,13 @@ class DaemonTests(unittest.TestCase):
         self.assertEqual(proxy.payload["tool_input"], {"command": "git status"})
 
     def test_review_with_daemon_uses_xmlrpc_over_tcp(self) -> None:
+        stop_requested = False
+
+        def stop():
+            nonlocal stop_requested
+            stop_requested = True
+            return {"ok": True}
+
         try:
             server = SimpleXMLRPCServer(
                 ("localhost", 0),
@@ -158,7 +165,13 @@ class DaemonTests(unittest.TestCase):
             self.skipTest(f"TCP bind is unavailable: {exc}")
         server.register_function(lambda: {"ok": True}, "status")
         server.register_function(lambda payload: {"category": "allow", "reason": "read-only"}, "review")
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server.register_function(stop, "stop")
+
+        def serve():
+            while not stop_requested:
+                server.handle_request()
+
+        thread = threading.Thread(target=serve, daemon=True)
         thread.start()
         try:
             config = self.config(daemon_port=server.server_address[1])
@@ -166,13 +179,33 @@ class DaemonTests(unittest.TestCase):
                 common.HookInput("/repo", "Bash", {"command": "git status"}, "", "none"),
                 config,
             )
+            stop_response = hook.daemon_proxy(config).stop()
         finally:
-            server.shutdown()
             server.server_close()
             thread.join(timeout=2)
 
         self.assertEqual(review, common.ReviewResult("allow", "read-only"))
+        self.assertEqual(stop_response, {"ok": True})
         self.assertFalse(thread.is_alive())
+
+    def test_daemon_stop_cli_calls_stop(self) -> None:
+        class FakeProxy:
+            def stop(self):
+                self.called = True
+                return {"ok": True}
+
+        proxy = FakeProxy()
+        stdout = io.StringIO()
+        with mock.patch.object(hook, "load_config", return_value=self.config()), mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ), mock.patch("sys.stdout", stdout):
+            code = hook.daemon_stop_cli()
+
+        self.assertEqual(code, 0)
+        self.assertTrue(proxy.called)
+        self.assertEqual(json.loads(stdout.getvalue()), {"ok": True})
 
 
 class FinalDecisionTests(unittest.TestCase):

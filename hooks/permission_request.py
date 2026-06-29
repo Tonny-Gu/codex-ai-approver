@@ -87,6 +87,18 @@ def _spawn_daemon() -> None:
 )
 
 
+def daemon_stop_cli() -> int:
+    config = load_config()
+    try:
+        response = daemon_proxy(config).stop()
+    except OSError as exc:
+        if not is_daemon_unavailable(exc):
+            raise
+        response = {"ok": True, "status": "not_running"}
+    print_json(response)
+    return 0
+
+
 def run_hook() -> int:
     try:
         config = load_config()
@@ -126,6 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     command = argv[0]
     if command == "--daemon":
         return run_daemon()
+    if command == "--daemon-stop":
+        return daemon_stop_cli()
 
     print(f"unknown option: {command}", file=sys.stderr)
     return 2

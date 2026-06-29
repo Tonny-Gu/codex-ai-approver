@@ -109,6 +109,8 @@ class DaemonReviewer:
 def run_daemon() -> int:
     config = load_config()
     reviewer = DaemonReviewer(config)
+    server: SimpleXMLRPCServer | None = None
+    stop_requested = False
     try:
         reviewer.start()
         server = SimpleXMLRPCServer(
@@ -120,9 +122,19 @@ def run_daemon() -> int:
         def review(payload: Any) -> dict[str, str]:
             return reviewer.review(HookInput(**payload)).__dict__
 
+        def stop() -> dict[str, bool]:
+            nonlocal stop_requested
+            stop_requested = True
+            return {"ok": True}
+
         server.register_function(reviewer.status, "status")
         server.register_function(review, "review")
-        server.serve_forever()
+        server.register_function(stop, "stop")
+
+        while not stop_requested:
+            server.handle_request()
     finally:
         reviewer.close()
+        if server is not None:
+            server.server_close()
     return 0
