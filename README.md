@@ -106,14 +106,7 @@ The hook reads `~/.codex-ai-approver.json`. If the file is missing, these defaul
 {
   "model": "gpt-5.5",
   "reasoning_effort": "medium",
-  "daemon": {
-    "enabled": true,
-    "socket_path": "",
-    "startup_timeout_seconds": 30,
-    "request_timeout_seconds": 120,
-    "idle_timeout_seconds": 1800,
-    "max_requests_per_thread": 100
-  },
+  "daemon_port": 47678,
   "permit_words": {
     "weak_deny": "weak_deny",
     "deny": "deny"
@@ -127,10 +120,7 @@ Example custom config:
 {
   "model": "gpt-5.5",
   "reasoning_effort": "medium",
-  "daemon": {
-    "enabled": true,
-    "max_requests_per_thread": 100
-  },
+  "daemon_port": 47678,
   "permit_words": {
     "weak_deny": "word-for-weak-risk",
     "deny": "word-for-higher-risk"
@@ -146,30 +136,7 @@ CODEX_AI_APPROVER_CONFIG=/path/to/config.json
 
 ## Long-Lived Daemon
 
-By default, the hook starts a detached local daemon and sends each permission payload over a Unix socket. The daemon keeps one Codex client and one warmed reviewer thread alive, runs each classification turn, then calls `thread/rollback` so the request history does not grow.
-
-Default socket paths:
-
-- `$XDG_RUNTIME_DIR/codex-ai-approver/daemon.sock` when `XDG_RUNTIME_DIR` is set.
-- `~/.codex-ai-approver/run/daemon.sock` otherwise.
-
-Manual controls:
-
-```bash
-python3 hooks/permission_request.py --daemon-status
-python3 hooks/permission_request.py --daemon-start
-python3 hooks/permission_request.py --daemon-stop
-```
-
-To disable the daemon and make every hook invocation create a fresh Codex reviewer process, set:
-
-```json
-{
-  "daemon": {
-    "enabled": false
-  }
-}
-```
+By default, the hook starts a detached local daemon and sends each permission payload over XML-RPC on `localhost:47678`. The daemon keeps one Codex client and one warmed reviewer thread alive, runs each classification turn, then calls `thread/rollback` so the request history does not grow.
 
 ## Failure Behavior
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 import hmac
@@ -16,21 +16,13 @@ SCOPE_ENV = "CODEX_APPROVER_SCOPE"
 PERMIT_LEVELS = {"none": 0, "weak_deny": 1, "deny": 2}
 REQUIRED_PERMIT = {"weak_deny": "weak_deny", "deny": "deny"}
 RISK_CATEGORIES = ("allow", "weak_deny", "deny", "strong_deny")
-DAEMON_REQUEST_MAX_BYTES = 1024 * 1024
 ENV_ASSIGN_RE = re.compile(
     r"""\s*([A-Za-z_][A-Za-z0-9_]*)=(?:"([^"]*)"|'([^']*)'|(\S+))"""
 )
 DEFAULT_CONFIG: dict[str, Any] = {
     "model": "gpt-5.5",
     "reasoning_effort": "medium",
-    "daemon": {
-        "enabled": True,
-        "socket_path": "",
-        "startup_timeout_seconds": 30,
-        "request_timeout_seconds": 120,
-        "idle_timeout_seconds": 1800,
-        "max_requests_per_thread": 100,
-    },
+    "daemon_port": 47678,
     "permit_words": {
         "weak_deny": "weak_deny",
         "deny": "deny",
@@ -68,21 +60,11 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 @dataclass(frozen=True)
-class DaemonConfig:
-    enabled: bool = True
-    socket_path: str = ""
-    startup_timeout_seconds: float = 30
-    request_timeout_seconds: float = 120
-    idle_timeout_seconds: float = 1800
-    max_requests_per_thread: int = 100
-
-
-@dataclass(frozen=True)
 class ApproverConfig:
     model: str
     reasoning_effort: str
     permit_words: dict[str, str]
-    daemon: DaemonConfig = field(default_factory=DaemonConfig)
+    daemon_port: int = 47678
 
 
 @dataclass(frozen=True)
@@ -121,7 +103,7 @@ def load_config(path: Path | None = None) -> ApproverConfig:
         model=_as_str(payload.get("model"), ""),
         reasoning_effort=_as_str(payload.get("reasoning_effort"), ""),
         permit_words=_load_permit_words(payload.get("permit_words")),
-        daemon=_load_daemon_config(payload.get("daemon")),
+        daemon_port=_as_port(payload.get("daemon_port"), "daemon_port"),
     )
 
 
@@ -255,73 +237,8 @@ def print_json(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, separators=(",", ":")))
 
 
-def daemon_socket_path(config: ApproverConfig) -> Path:
-    raw = config.daemon.socket_path.strip()
-    if raw:
-        return Path(raw).expanduser()
-
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime_dir:
-        return Path(runtime_dir).expanduser() / "codex-ai-approver" / "daemon.sock"
-    return Path.home() / ".codex-ai-approver" / "run" / "daemon.sock"
-
-
-def daemon_aux_path(socket_path: Path, suffix: str) -> Path:
-    return socket_path.parent / f"{socket_path.name}{suffix}"
-
-
-def ensure_daemon_parent(socket_path: Path, config: ApproverConfig) -> None:
-    socket_path.parent.mkdir(parents=True, exist_ok=True)
-    if not config.daemon.socket_path.strip():
-        try:
-            os.chmod(socket_path.parent, 0o700)
-        except OSError:
-            pass
-
-
 def is_daemon_unavailable(exc: OSError) -> bool:
-    return isinstance(exc, (FileNotFoundError, ConnectionRefusedError, PermissionError))
-
-
-def hook_input_to_payload(hook_input: HookInput) -> dict[str, Any]:
-    return {
-        "cwd": hook_input.cwd,
-        "tool_name": hook_input.tool_name,
-        "tool_input": hook_input.tool_input,
-        "scope": hook_input.scope,
-        "permit_level": hook_input.permit_level,
-    }
-
-
-def hook_input_from_payload(payload: Any) -> HookInput:
-    if not isinstance(payload, dict):
-        raise ValueError("daemon hook_input must be a JSON object")
-    tool_input = payload.get("tool_input") or {}
-    if not isinstance(tool_input, dict):
-        raise ValueError("daemon hook_input.tool_input must be a JSON object")
-    return HookInput(
-        cwd=_string(payload.get("cwd"), ""),
-        tool_name=_string(payload.get("tool_name"), ""),
-        tool_input=tool_input,
-        scope=_string(payload.get("scope"), ""),
-        permit_level=_string(payload.get("permit_level"), "none"),
-    )
-
-
-def review_result_to_payload(review: ReviewResult) -> dict[str, str]:
-    return {"category": review.category, "reason": review.reason}
-
-
-def review_result_from_payload(payload: Any) -> ReviewResult:
-    if not isinstance(payload, dict):
-        raise ValueError("daemon review must be a JSON object")
-    category = payload.get("category")
-    reason = payload.get("reason")
-    if category not in RISK_CATEGORIES:
-        raise ValueError(f"invalid daemon review category: {category!r}")
-    if not isinstance(reason, str) or not reason.strip():
-        reason = "Codex AI Approver daemon returned no reason."
-    return ReviewResult(category=category, reason=reason.strip())
+    return isinstance(exc, (ConnectionRefusedError, PermissionError))
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -344,37 +261,12 @@ def _load_permit_words(value: Any) -> dict[str, str]:
     return permit_words
 
 
-def _load_daemon_config(value: Any) -> DaemonConfig:
-    if not isinstance(value, dict):
-        raise ValueError("daemon must be a JSON object")
-    return DaemonConfig(
-        enabled=_as_bool(value.get("enabled"), "daemon.enabled"),
-        socket_path=_as_optional_str(value.get("socket_path"), "daemon.socket_path"),
-        startup_timeout_seconds=_as_positive_float(
-            value.get("startup_timeout_seconds"),
-            "daemon.startup_timeout_seconds",
-        ),
-        request_timeout_seconds=_as_positive_float(
-            value.get("request_timeout_seconds"),
-            "daemon.request_timeout_seconds",
-        ),
-        idle_timeout_seconds=_as_non_negative_float(
-            value.get("idle_timeout_seconds"),
-            "daemon.idle_timeout_seconds",
-        ),
-        max_requests_per_thread=_as_positive_int(
-            value.get("max_requests_per_thread"),
-            "daemon.max_requests_per_thread",
-        ),
-    )
-
-
 def default_config() -> dict[str, Any]:
     return deepcopy(DEFAULT_CONFIG)
 
 
 def merge_config(base: dict[str, Any], override: dict[str, Any]) -> None:
-    for key in ("model", "reasoning_effort"):
+    for key in ("model", "reasoning_effort", "daemon_port"):
         if key in override:
             base[key] = override[key]
     permit_words = override.get("permit_words")
@@ -382,11 +274,6 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> None:
         base["permit_words"].update(permit_words)
     elif "permit_words" in override:
         base["permit_words"] = permit_words
-    daemon = override.get("daemon")
-    if isinstance(daemon, dict) and isinstance(base.get("daemon"), dict):
-        base["daemon"].update(daemon)
-    elif "daemon" in override:
-        base["daemon"] = daemon
 
 
 def parse_bash_controls(command: str) -> tuple[str, str, str]:
@@ -431,33 +318,13 @@ def _as_str(value: Any, default: str) -> str:
     return default
 
 
-def _as_optional_str(value: Any, name: str) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    raise ValueError(f"{name} must be a string")
-
-
 def _as_bool(value: Any, name: str) -> bool:
     if isinstance(value, bool):
         return value
     raise ValueError(f"{name} must be true or false")
 
 
-def _as_positive_float(value: Any, name: str) -> float:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
-        return float(value)
-    raise ValueError(f"{name} must be a positive number")
-
-
-def _as_non_negative_float(value: Any, name: str) -> float:
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
-        return float(value)
-    raise ValueError(f"{name} must be a non-negative number")
-
-
-def _as_positive_int(value: Any, name: str) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+def _as_port(value: Any, name: str) -> int:
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535:
         return value
-    raise ValueError(f"{name} must be a positive integer")
+    raise ValueError(f"{name} must be an integer from 1 to 65535")
