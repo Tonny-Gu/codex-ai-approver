@@ -78,7 +78,7 @@ class HookInputTests(unittest.TestCase):
                     "tool_name": "Bash",
                     "tool_input": {
                         "command": (
-                            'FOO=bar CODEX_APPROVER_SCOPE="inspect logs" '
+                            'FOO=bar CODEX_APPROVER_JUSTIFICATION="inspect app logs to debug startup failure" '
                             "CODEX_APPROVER_PERMIT=secret-token git status"
                         )
                     },
@@ -89,9 +89,13 @@ class HookInputTests(unittest.TestCase):
         self.assertEqual(hook_input.cwd, "/repo")
         self.assertEqual(hook_input.tool_name, "Bash")
         self.assertEqual(hook_input.tool_input, {"command": "FOO=bar git status"})
-        self.assertEqual(hook_input.scope, "inspect logs")
+        self.assertEqual(hook_input.justification, "inspect app logs to debug startup failure")
         self.assertEqual(hook_input.permit_level, "weak_deny")
-        self.assertNotIn("secret-token", common.build_prompt(hook_input))
+        prompt = common.build_prompt(hook_input)
+        self.assertNotIn("secret-token", prompt)
+        self.assertNotIn("User permit", prompt)
+        self.assertNotIn("weak_deny", prompt)
+        self.assertIn("Agent justification", prompt)
 
     def test_uses_default_permit_words(self) -> None:
         hook_input = common.parse_hook_input(
@@ -101,7 +105,7 @@ class HookInputTests(unittest.TestCase):
                     "tool_name": "Bash",
                     "tool_input": {
                         "command": (
-                            'CODEX_APPROVER_SCOPE="inspect logs" '
+                            'CODEX_APPROVER_JUSTIFICATION="inspect logs" '
                             "CODEX_APPROVER_PERMIT=weak_deny git status"
                         )
                     },
@@ -118,6 +122,9 @@ class LlmParsingTests(unittest.TestCase):
 
     def test_reviewer_prompt_requires_short_reason(self) -> None:
         self.assertIn("Keep the reason to one short sentence.", common.DEVELOPER_INSTRUCTIONS)
+        self.assertIn("necessary and proportional", common.DEVELOPER_INSTRUCTIONS)
+        self.assertNotIn("User permit", common.DEVELOPER_INSTRUCTIONS)
+        self.assertNotIn("permit is present", common.DEVELOPER_INSTRUCTIONS)
 
 
 class DaemonTests(unittest.TestCase):
@@ -214,19 +221,20 @@ class FinalDecisionTests(unittest.TestCase):
         decision = common.final_decision(review, "none", "inspect logs", "Bash")
         self.assertEqual(decision.behavior, "deny")
         self.assertIn("ask the user only for the weak_deny permit word", decision.message)
-        self.assertIn("Write a brief approval scope yourself", decision.message)
-        self.assertIn("CODEX_APPROVER_SCOPE", decision.message)
+        self.assertIn("Write a brief justification yourself", decision.message)
+        self.assertIn("necessary and proportional", decision.message)
+        self.assertIn("CODEX_APPROVER_JUSTIFICATION", decision.message)
         self.assertIn("CODEX_APPROVER_PERMIT", decision.message)
         self.assertIn("very start of the Bash command", decision.message)
         self.assertIn("before sudo", decision.message)
         self.assertEqual(common.final_decision(review, "weak_deny", "inspect logs").behavior, "allow")
         self.assertEqual(common.final_decision(review, "deny", "inspect logs").behavior, "allow")
 
-    def test_permit_requires_scope(self) -> None:
+    def test_permit_requires_justification(self) -> None:
         review = common.ReviewResult("weak_deny", "needs privileged read")
         decision = common.final_decision(review, "weak_deny", "", "Bash")
         self.assertEqual(decision.behavior, "deny")
-        self.assertIn("requires an agent-written scope", decision.message)
+        self.assertIn("requires an agent-written justification", decision.message)
         self.assertIn("ask the user only for the weak_deny permit word", decision.message)
         self.assertIn("do not invent the permit word", decision.message)
 
@@ -234,8 +242,8 @@ class FinalDecisionTests(unittest.TestCase):
         review = common.ReviewResult("deny", "writes outside workspace")
         decision = common.final_decision(review, "none", "", "apply_patch")
         self.assertEqual(decision.behavior, "deny")
-        self.assertIn("only accepts scope and permit words through Bash", decision.message)
-        self.assertIn("do not attach CODEX_APPROVER_SCOPE", decision.message)
+        self.assertIn("only accepts justification and permit words through Bash", decision.message)
+        self.assertIn("do not attach CODEX_APPROVER_JUSTIFICATION", decision.message)
         self.assertIn("narrow the request", decision.message)
 
     def test_strong_deny_cannot_be_permitted(self) -> None:

@@ -44,15 +44,15 @@ Codex also has a built-in [Auto-review](https://developers.openai.com/codex/conc
 
 This plugin is different: it is a plugin-bundled `PermissionRequest` hook. In the current open-source Codex implementation, `PermissionRequest` hooks run in the approval path before guardian/Auto-review or the user approval UI. If a matching hook returns `allow` or `deny`, that hook decision takes top precedence. If no matching hook returns a decision, Codex falls back to the normal Auto-review or user approval path.
 
-The main motivation is context control. Codex Auto-review gives its reviewer a compact transcript plus the exact approval request. That transcript can include user messages, assistant updates, relevant tool calls, and tool outputs. Codex AI Approver intentionally sends a smaller payload to its reviewer model: working directory, tool name, sanitized tool input, explicit user scope, and validated permit level. That usually means less contextual leakage and a smaller approval prompt, at the cost of less broad conversation awareness.
+The main motivation is context control. Codex Auto-review gives its reviewer a compact transcript plus the exact approval request. That transcript can include user messages, assistant updates, relevant tool calls, and tool outputs. Codex AI Approver intentionally sends a smaller prompt to its reviewer model: working directory, tool name, sanitized tool input, and the agent's justification for the request. The reviewer prompt does not include the permit word or permit level. That usually means less contextual leakage and a smaller approval prompt, at the cost of less broad conversation awareness.
 
 Key differences:
 
 - **Layer:** Auto-review is a built-in Codex sandbox-boundary reviewer; this project is a plugin lifecycle hook.
-- **Context:** Auto-review sees a compact retained transcript and tool evidence; this hook sees only the current permission request plus explicit scope/permit metadata.
+- **Context:** Auto-review sees a compact retained transcript and tool evidence; this hook's reviewer prompt sees only the current permission request plus the agent's justification.
 - **Precedence:** When `PermissionRequest` hook evaluation is enabled, a hook decision is handled before Auto-review or user approval.
 - **Policy shape:** Auto-review follows Codex's reviewer policy and supports policy customization through Codex configuration; this hook uses four local risk categories and optional local permit words.
-- **User override:** Auto-review has its own denial override flow in Codex; this hook uses Bash prefix variables for scoped permit words.
+- **User override:** Auto-review has its own denial override flow in Codex; this hook uses Bash prefix variables for agent-written justifications and user-provided permit words.
 - **Failure mode:** Auto-review timeouts and denials are handled by Codex; this hook fails closed by returning a deny message that tells the agent the hook setup/runtime failed.
 - **Coverage:** Auto-review focuses on approval requests that cross the active sandbox or policy boundary. This hook sees supported `PermissionRequest` hook payloads from the plugin system.
 
@@ -68,33 +68,33 @@ For this plugin to be the primary approver, keep hooks enabled and trusted, and 
 
 The reviewer model returns one of four categories:
 
-- `allow`: clearly scoped, low-risk, reversible, or read-only actions.
-- `weak_deny`: sensitive but in-scope read-only inspection, such as privileged logs, process inspection, or necessary secret reads.
-- `deny`: in-scope actions with side effects, network access, package installs, service control, permission changes, writes outside the workspace, or unclear blast radius.
-- `strong_deny`: destructive, out-of-scope, bypass-oriented, or too dangerous to permit.
+- `allow`: clearly justified, low-risk, reversible, or read-only actions.
+- `weak_deny`: justified sensitive read-only inspection, such as privileged logs, process inspection, or necessary secret reads.
+- `deny`: justified actions with side effects, network access, package installs, service control, permission changes, writes outside the workspace, or unclear blast radius.
+- `strong_deny`: destructive, unjustified, bypass-oriented, or too dangerous to permit.
 
 Final authorization is stricter than classification:
 
 - `allow` is allowed.
-- `weak_deny` requires a scope and a valid `weak_deny` or `deny` permit word.
-- `deny` requires a scope and a valid `deny` permit word.
+- `weak_deny` requires an agent-written justification and a valid `weak_deny` or `deny` permit word.
+- `deny` requires an agent-written justification and a valid `deny` permit word.
 - `strong_deny` is always denied and cannot be permitted.
 
-## Bash Scope and Permit Words
+## Bash Justification and Permit Words
 
 For Bash approvals, an agent can pass user-provided context with prefix environment variables:
 
 ```bash
-CODEX_APPROVER_SCOPE="inspect service logs" CODEX_APPROVER_PERMIT="weak_deny" sudo journalctl -u app
+CODEX_APPROVER_JUSTIFICATION="Need to inspect app service logs to debug the startup failure; read-only log access only." CODEX_APPROVER_PERMIT="weak_deny" sudo journalctl -u app
 ```
 
-The variables must be placed at the very start of the Bash command, before `sudo`, `env`, or the actual command. The hook parses these prefixes, verifies the permit word locally, and removes the permit word from the prompt sent to the reviewer model.
+The variables must be placed at the very start of the Bash command, before `sudo`, `env`, or the actual command. The hook parses these prefixes, verifies the permit word locally, and excludes both the permit word and validated permit level from the prompt sent to the reviewer model.
 
-The permit word is not something the agent should invent. If the hook denies a request because scope or permit is missing, the agent should write a brief scope from the current task, ask the user only for the required permit word, then retry the Bash command with the prefix variables.
+The justification is written by the agent and should explain why this exact request is necessary and proportional to the current task, including the intended boundary. The permit word is not something the agent should invent. If the hook denies a request because justification or permit is missing, the agent should write the justification itself, ask the user only for the required permit word, then retry the Bash command with the prefix variables.
 
 ## Non-Bash Requests
 
-Scope and permit words can only be passed through Bash command prefixes. For `apply_patch` and MCP tool approvals, the agent should not try to attach `CODEX_APPROVER_SCOPE` or `CODEX_APPROVER_PERMIT` to the tool call.
+Justification and permit words can only be passed through Bash command prefixes. For `apply_patch` and MCP tool approvals, the agent should not try to attach `CODEX_APPROVER_JUSTIFICATION` or `CODEX_APPROVER_PERMIT` to the tool call.
 
 If a non-Bash request is denied, the expected next step is to narrow the request, use a safer alternative, or use a Bash equivalent when that is appropriate.
 

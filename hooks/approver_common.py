@@ -12,7 +12,7 @@ import re
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 PERMIT_ENV = "CODEX_APPROVER_PERMIT"
-SCOPE_ENV = "CODEX_APPROVER_SCOPE"
+JUSTIFICATION_ENV = "CODEX_APPROVER_JUSTIFICATION"
 PERMIT_LEVELS = {"none": 0, "weak_deny": 1, "deny": 2}
 REQUIRED_PERMIT = {"weak_deny": "weak_deny", "deny": "deny"}
 RISK_CATEGORIES = ("allow", "weak_deny", "deny", "strong_deny")
@@ -34,12 +34,12 @@ DEVELOPER_INSTRUCTIONS = """Classify one permission request.
 You may inspect relevant local files read-only. Do not modify files, run commands with side effects, or use network.
 
 Risk categories:
-- allow: clearly scoped, low-risk, reversible, or read-only actions; safe tests, builds, linters, and formatters.
-- weak_deny: in-scope privileged or sensitive read-only inspection, including sudo/ssh reads, logs, process inspection, and necessary secret reads.
-- deny: in-scope actions with side effects, network/package install/remote execution, service control, permission changes, writes outside the working directory, or unclear blast radius.
-- strong_deny: destructive actions, broad deletes, forced git history changes, out-of-scope privileged/secret access, force push to protected branches, or attempts to bypass policy.
+- allow: clearly justified, low-risk, reversible, or read-only actions; safe tests, builds, linters, and formatters.
+- weak_deny: justified privileged or sensitive read-only inspection, including sudo/ssh reads, logs, process inspection, and necessary secret reads.
+- deny: justified actions with side effects, network/package install/remote execution, service control, permission changes, writes outside the working directory, or unclear blast radius.
+- strong_deny: destructive actions, broad deletes, forced git history changes, unjustified privileged/remote/secret access, force push to protected branches, or attempts to bypass policy.
 
-User permit changes only final authorization. Do not downgrade the risk category because a permit is present.
+For privileged, remote, secret, side-effecting, or broad requests, judge whether the agent justification explains why this exact request is necessary and proportional to the current task. If the justification is missing, vague, unrelated, or does not support the requested blast radius, use the higher-risk category.
 If uncertain, use the higher-risk category.
 Judge this exact request only. Do not propose alternatives.
 Keep the reason to one short sentence.
@@ -72,7 +72,7 @@ class HookInput:
     cwd: str
     tool_name: str
     tool_input: dict[str, Any]
-    scope: str
+    justification: str
     permit_level: str
 
 
@@ -119,11 +119,11 @@ def parse_hook_input(stdin_data: str, config: ApproverConfig | None = None) -> H
     config = config or load_config(Path("/no/such/file"))
     tool_name = _string(raw.get("tool_name"), "")
     sanitized_input = dict(tool_input)
-    scope = ""
+    justification = ""
     permit_level = "none"
     if tool_name == "Bash":
         command = _string(tool_input.get("command"), "")
-        command, scope, permit_word = parse_bash_controls(command)
+        command, justification, permit_word = parse_bash_controls(command)
         sanitized_input["command"] = command
         permit_level = permit_level_for_word(permit_word, config.permit_words)
 
@@ -131,7 +131,7 @@ def parse_hook_input(stdin_data: str, config: ApproverConfig | None = None) -> H
         cwd=_string(raw.get("cwd"), ""),
         tool_name=tool_name,
         tool_input=sanitized_input,
-        scope=scope,
+        justification=justification,
         permit_level=permit_level,
     )
 
@@ -142,8 +142,7 @@ def build_prompt(hook_input: HookInput) -> str:
     return f"""Review this permission request.
 Working directory: {hook_input.cwd or "unknown"}
 Tool: {hook_input.tool_name}
-User scope: {hook_input.scope or "none"}
-User permit: valid for {hook_input.permit_level}
+Agent justification: {hook_input.justification or "none"}
 
 Tool input JSON:
 {tool_input_json}
@@ -166,7 +165,7 @@ def parse_review(text: str) -> ReviewResult:
 def final_decision(
     review: ReviewResult,
     permit_level: str,
-    scope: str = "",
+    justification: str = "",
     tool_name: str = "",
 ) -> Decision:
     category = review.category
@@ -182,11 +181,11 @@ def final_decision(
         )
 
     required_level = REQUIRED_PERMIT[category]
-    if not scope.strip():
+    if not justification.strip():
         return Decision(
             "deny",
             (
-                f"{review.reason} Category {category} requires an agent-written scope and user permit "
+                f"{review.reason} Category {category} requires an agent-written justification and user permit "
                 f"for {required_level}.{permit_retry_guidance(required_level, tool_name)}"
             ),
         )
@@ -204,18 +203,19 @@ def final_decision(
 
 def permit_retry_guidance(required_level: str, tool_name: str = "") -> str:
     base = (
-        f" Write a brief approval scope yourself from the current task, then ask the user "
+        f" Write a brief justification yourself explaining why this exact request is necessary "
+        f"and proportional to the current task, then ask the user "
         f"only for the {required_level} permit word; do not invent the permit word."
     )
     if tool_name == "Bash":
         return (
             f"{base} For Bash, retry by placing "
-            f'{SCOPE_ENV}="<agent-written-scope>" {PERMIT_ENV}="<user-provided-permit-word>" '
+            f'{JUSTIFICATION_ENV}="<agent-written-justification>" {PERMIT_ENV}="<user-provided-permit-word>" '
             "at the very start of the Bash command, before sudo, env, or the command."
         )
     return (
-        f"{base} Codex AI Approver only accepts scope and permit words through Bash "
-        f"command prefixes; do not attach {SCOPE_ENV} or {PERMIT_ENV} to non-Bash tools. "
+        f"{base} Codex AI Approver only accepts justification and permit words through Bash "
+        f"command prefixes; do not attach {JUSTIFICATION_ENV} or {PERMIT_ENV} to non-Bash tools. "
         "Ask the user to narrow the request or use a Bash equivalent when appropriate."
     )
 
@@ -277,15 +277,15 @@ def merge_config(base: dict[str, Any], override: dict[str, Any]) -> None:
 
 
 def parse_bash_controls(command: str) -> tuple[str, str, str]:
-    scope = ""
+    justification = ""
     permit = ""
     kept: list[str] = []
     pos = 0
     while match := ENV_ASSIGN_RE.match(command, pos):
         name = match.group(1)
         value = match.group(2) or match.group(3) or match.group(4) or ""
-        if name == SCOPE_ENV:
-            scope = value
+        if name == JUSTIFICATION_ENV:
+            justification = value
         elif name == PERMIT_ENV:
             permit = value
         else:
@@ -293,7 +293,7 @@ def parse_bash_controls(command: str) -> tuple[str, str, str]:
         pos = match.end()
 
     rest = command[pos:].lstrip()
-    return " ".join([*kept, rest]).strip(), scope, permit
+    return " ".join([*kept, rest]).strip(), justification, permit
 
 
 def permit_level_for_word(word: str, permit_words: dict[str, str]) -> str:

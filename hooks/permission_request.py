@@ -107,7 +107,7 @@ def run_hook() -> int:
         decision = final_decision(
             review,
             hook_input.permit_level,
-            hook_input.scope,
+            hook_input.justification,
             hook_input.tool_name,
         )
         print_json(permission_request_output(decision.behavior, decision.message))
