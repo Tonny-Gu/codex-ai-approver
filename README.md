@@ -51,7 +51,7 @@ Key differences:
 - **Layer:** Auto-review is a built-in Codex sandbox-boundary reviewer; this project is a plugin lifecycle hook.
 - **Context:** Auto-review sees a compact retained transcript and tool evidence; this hook's reviewer prompt sees only the current permission request plus the agent's justification.
 - **Precedence:** When `PermissionRequest` hook evaluation is enabled, a hook decision is handled before Auto-review or user approval.
-- **Policy shape:** Auto-review follows Codex's reviewer policy and supports policy customization through Codex configuration; this hook uses four local risk categories and optional local permit words.
+- **Policy shape:** Auto-review follows Codex's reviewer policy and supports policy customization through Codex configuration; this hook uses fixed local risk categories and optional local permit words for each permittable category.
 - **User override:** Auto-review has its own denial override flow in Codex; this hook uses Bash prefix variables for agent-written justifications and user-provided permit words.
 - **Failure mode:** Auto-review timeouts and denials are handled by Codex; this hook fails closed by returning a deny message that tells the agent the hook setup/runtime failed.
 - **Coverage:** Auto-review focuses on approval requests that cross the active sandbox or policy boundary. This hook sees supported `PermissionRequest` hook payloads from the plugin system.
@@ -66,35 +66,71 @@ For this plugin to be the primary approver, keep hooks enabled and trusted, and 
 
 ## Risk Categories
 
-The reviewer model returns one of four categories:
+The reviewer model returns every category that applies. `allow` is used only when no other category applies.
 
-- `allow`: clearly justified, low-risk, reversible, or read-only actions.
-- `weak_deny`: justified sensitive read-only inspection, such as privileged logs, process inspection, or necessary secret reads.
-- `deny`: justified actions with side effects, network access, package installs, service control, permission changes, writes outside the workspace, or unclear blast radius.
-- `strong_deny`: destructive, unjustified, bypass-oriented, or too dangerous to permit.
+No-permit category:
+
+- `allow`: clearly justified actions that are low-risk, scoped, reversible, and have no privileged access, secret exposure, external side effects, or persistent production impact. Includes safe local tests, builds, linters, formatters, ordinary workspace edits requested by the user, and local git staging/commits that do not discard work, rewrite history, or affect remotes.
+
+Permittable categories:
+
+- `privileged_read`: sudo/admin/root read-only access.
+- `log_read`: log inspection.
+- `process_inspection`: process, port, performance, or system-state inspection.
+- `secret_read`: secret, token, credential, or environment-variable reads.
+- `personal_data_access`: personal or private user data such as email, calendar, contacts, browser data, local documents, or history.
+- `network_fetch`: outbound read-only network access or data fetches.
+- `external_side_effect`: external writes such as sending messages, posting comments, creating tickets, submitting forms, or calling webhooks.
+- `package_install`: package manager installs, upgrades, or dependency fetches.
+- `dependency_or_supply_chain_change`: dependency, lockfile, package source, toolchain, base image, or CI action changes.
+- `remote_execution`: SSH or other remote command execution.
+- `service_control`: service, daemon, container, VM, or cluster control.
+- `production_change`: production deploy, feature flag, environment config, scaling, cache, CDN, or infrastructure behavior change.
+- `permission_change`: chmod/chown/ACL/capability/IAM/access-control changes.
+- `auth_or_credential_change`: login, logout, token creation, key rotation, credential revocation, SSH/GPG/keychain/OAuth changes.
+- `persistent_data_write`: database, cache, queue, object storage, search index, or other persistent state mutation.
+- `write_outside_workspace`: writes outside the current working directory.
+- `scheduled_or_persistent_execution`: cron, systemd timer, launch agent, startup hook, scheduled CI, background worker, or persistent job creation.
+- `resource_intensive`: load tests, long-running jobs, high CPU/GPU/memory/disk/network usage, or large batch operations.
+- `publication_or_release`: release or publication of packages, images, repositories, artifacts, announcements, or public content.
+
+Non-permittable categories:
+
+- `destructive_action`: irreversible or broad destructive deletes, overwrites, data loss, or cleanup affecting user data, production data, shared resources, or unclear targets.
+- `git_worktree_discard`: discarding uncommitted changes without explicit user intent.
+- `git_history_rewrite`: forced history changes such as reset, rebase rewrites, filter-branch, reflog-sensitive operations, or deleting refs.
+- `protected_branch_force_push`: force push to protected, shared, release, main, or unclear branches.
+- `policy_bypass`: attempts to bypass approval, sandboxing, authentication, monitoring, or safety policy.
+- `unjustified_access`: privileged, remote, secret, personal-data, side-effecting, or broad access without concrete necessary and proportional justification.
+- `unclear_blast_radius`: request has an unclear, ambiguous, or overly broad blast radius.
+- `data_exfiltration`: sending secrets, credentials, private code, personal data, logs, dumps, or proprietary data to external destinations without explicit necessity and authorization.
+- `unreviewed_untrusted_code_execution`: executing untrusted downloaded, pasted, generated, or third-party code without review and justification, especially with elevated privileges or network access.
+- `identity_or_access_grant_to_third_party`: granting third parties access, sharing private resources publicly, inviting users, adding deploy keys, or authorizing OAuth apps without explicit authorization.
+- `financial_or_legal_commitment`: purchases, trades, billing changes, legal filings, contract acceptance, or other binding commitments.
+- `unauthorized_publication`: public release or publication of packages, images, repositories, artifacts, announcements, or confidential information without explicit authorization.
 
 Final authorization is stricter than classification:
 
 - `allow` is allowed.
-- `weak_deny` requires an agent-written justification and a valid `weak_deny` or `deny` permit word.
-- `deny` requires an agent-written justification and a valid `deny` permit word.
-- `strong_deny` is always denied and cannot be permitted.
+- Every permittable category returned by the reviewer requires an agent-written justification and a matching user-provided permit word.
+- If the reviewer returns more than one permittable category, every category must be permitted.
+- Non-permittable categories are always denied and cannot be permitted.
 
 ## Bash Justification and Permit Words
 
 For Bash approvals, an agent can pass user-provided context with prefix environment variables:
 
 ```bash
-CODEX_APPROVER_JUSTIFICATION="Need to inspect app service logs to debug the startup failure; read-only log access only." CODEX_APPROVER_PERMIT="weak_deny" sudo journalctl -u app
+CODEX_APPROVER_JUSTIFICATION="Need to install project test dependencies; package install and network fetch only." CODEX_APPROVER_PERMITS="package_install network_fetch" pip install -r requirements.txt
 ```
 
-The variables must be placed at the very start of the Bash command, before `sudo`, `env`, or the actual command. The hook parses these prefixes, verifies the permit word locally, and excludes both the permit word and validated permit level from the prompt sent to the reviewer model.
+The variables must be placed at the very start of the Bash command, before `sudo`, `env`, or the actual command. The hook parses these prefixes, verifies the permit words locally, and excludes both the permit words and matched permit categories from the prompt sent to the reviewer model.
 
-The justification is written by the agent and should explain why this exact request is necessary and proportional to the current task, including the intended boundary. The permit word is not something the agent should invent. If the hook denies a request because justification or permit is missing, the agent should write the justification itself, ask the user only for the required permit word, then retry the Bash command with the prefix variables.
+The justification is written by the agent and should explain why this exact request is necessary and proportional to the current task, including the intended boundary. Permit words are not something the agent should invent. If the hook denies a request because justification or permits are missing, the agent should write the justification itself, ask the user only for the required permit words, then retry the Bash command with the prefix variables.
 
 ## Non-Bash Requests
 
-Justification and permit words can only be passed through Bash command prefixes. For `apply_patch` and MCP tool approvals, the agent should not try to attach `CODEX_APPROVER_JUSTIFICATION` or `CODEX_APPROVER_PERMIT` to the tool call.
+Justification and permit words can only be passed through Bash command prefixes. For `apply_patch` and MCP tool approvals, the agent should not try to attach `CODEX_APPROVER_JUSTIFICATION` or `CODEX_APPROVER_PERMITS` to the tool call.
 
 If a non-Bash request is denied, the expected next step is to narrow the request, use a safer alternative, or use a Bash equivalent when that is appropriate.
 
@@ -108,8 +144,25 @@ The hook reads `~/.codex-ai-approver.json`. If the file is missing, these defaul
   "reasoning_effort": "medium",
   "daemon_port": 47678,
   "permit_words": {
-    "weak_deny": "weak_deny",
-    "deny": "deny"
+    "privileged_read": "privileged_read",
+    "log_read": "log_read",
+    "process_inspection": "process_inspection",
+    "secret_read": "secret_read",
+    "personal_data_access": "personal_data_access",
+    "network_fetch": "network_fetch",
+    "external_side_effect": "external_side_effect",
+    "package_install": "package_install",
+    "dependency_or_supply_chain_change": "dependency_or_supply_chain_change",
+    "remote_execution": "remote_execution",
+    "service_control": "service_control",
+    "production_change": "production_change",
+    "permission_change": "permission_change",
+    "auth_or_credential_change": "auth_or_credential_change",
+    "persistent_data_write": "persistent_data_write",
+    "write_outside_workspace": "write_outside_workspace",
+    "scheduled_or_persistent_execution": "scheduled_or_persistent_execution",
+    "resource_intensive": "resource_intensive",
+    "publication_or_release": "publication_or_release"
   }
 }
 ```
@@ -122,11 +175,16 @@ Example custom config:
   "reasoning_effort": "medium",
   "daemon_port": 47678,
   "permit_words": {
-    "weak_deny": "word-for-weak-risk",
-    "deny": "word-for-higher-risk"
+    "package_install": "word-for-package-installs",
+    "network_fetch": "word-for-network-fetch",
+    "remote_execution": "word-for-remote-execution",
+    "service_control": "word-for-service-control",
+    "production_change": "word-for-production-change"
   }
 }
 ```
+
+If `permit_words` is present in the config file, it replaces the default permit-word set. Only listed categories can be permitted. Permit word keys must be one of the fixed permittable categories; unknown category names and duplicate permit words are rejected.
 
 You can override the config path by setting this in the environment where Codex launches hooks:
 

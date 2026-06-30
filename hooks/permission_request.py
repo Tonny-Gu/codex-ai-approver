@@ -106,7 +106,7 @@ def run_hook() -> int:
         review = review_with_daemon(hook_input, config)
         decision = final_decision(
             review,
-            hook_input.permit_level,
+            hook_input.permit_categories,
             hook_input.justification,
             hook_input.tool_name,
         )

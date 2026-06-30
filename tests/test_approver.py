@@ -24,7 +24,10 @@ class ConfigTests(unittest.TestCase):
         config = common.load_config(Path("/no/such/file"))
         self.assertEqual(config.model, "gpt-5.5")
         self.assertEqual(config.reasoning_effort, "medium")
-        self.assertEqual(config.permit_words, {"weak_deny": "weak_deny", "deny": "deny"})
+        self.assertEqual(
+            config.permit_words,
+            {category: category for category in common.PERMITTABLE_CATEGORIES},
+        )
         self.assertEqual(config.daemon_port, 47678)
 
     def test_reads_json(self) -> None:
@@ -33,21 +36,38 @@ class ConfigTests(unittest.TestCase):
             path.write_text(
                 (
                     '{"model":"gpt-5.4","reasoning_effort":"high",'
-                    '"permit_words":{"weak_deny":"weak","deny":"higher"}}\n'
+                    '"permit_words":{"package_install":"pkg","remote_execution":"remote"}}\n'
                 ),
                 encoding="utf-8",
             )
             config = common.load_config(path)
         self.assertEqual(config.model, "gpt-5.4")
         self.assertEqual(config.reasoning_effort, "high")
-        self.assertEqual(config.permit_words, {"weak_deny": "weak", "deny": "higher"})
+        self.assertEqual(config.permit_words, {"package_install": "pkg", "remote_execution": "remote"})
 
-    def test_partial_permit_words_override_defaults(self) -> None:
+    def test_permit_words_replace_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
-            path.write_text('{"permit_words":{"weak_deny":"custom"}}\n', encoding="utf-8")
+            path.write_text('{"permit_words":{"service_control":"custom"}}\n', encoding="utf-8")
             config = common.load_config(path)
-        self.assertEqual(config.permit_words, {"weak_deny": "custom", "deny": "deny"})
+        self.assertEqual(config.permit_words, {"service_control": "custom"})
+
+    def test_unknown_permit_word_category_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text('{"permit_words":{"unknown":"word"}}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "unknown permit_words categories"):
+                common.load_config(path)
+
+    def test_duplicate_permit_words_are_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.json"
+            path.write_text(
+                '{"permit_words":{"package_install":"same","network_fetch":"same"}}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicates permit word"):
+                common.load_config(path)
 
     def test_reads_daemon_port(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -66,10 +86,13 @@ class ConfigTests(unittest.TestCase):
 
 class HookInputTests(unittest.TestCase):
     def test_parses_hook_input(self) -> None:
+        permit_words = {category: category for category in common.PERMITTABLE_CATEGORIES}
+        permit_words["privileged_read"] = "priv-token"
+        permit_words["log_read"] = "log-token"
         config = common.ApproverConfig(
             model="gpt-5.5",
             reasoning_effort="medium",
-            permit_words={"weak_deny": "secret-token", "deny": "deny"},
+            permit_words=permit_words,
         )
         hook_input = common.parse_hook_input(
             json.dumps(
@@ -79,7 +102,7 @@ class HookInputTests(unittest.TestCase):
                     "tool_input": {
                         "command": (
                             'FOO=bar CODEX_APPROVER_JUSTIFICATION="inspect app logs to debug startup failure" '
-                            "CODEX_APPROVER_PERMIT=secret-token git status"
+                            'CODEX_APPROVER_PERMITS="priv-token log-token" git status'
                         )
                     },
                 }
@@ -90,11 +113,12 @@ class HookInputTests(unittest.TestCase):
         self.assertEqual(hook_input.tool_name, "Bash")
         self.assertEqual(hook_input.tool_input, {"command": "FOO=bar git status"})
         self.assertEqual(hook_input.justification, "inspect app logs to debug startup failure")
-        self.assertEqual(hook_input.permit_level, "weak_deny")
+        self.assertEqual(hook_input.permit_categories, ["privileged_read", "log_read"])
         prompt = common.build_prompt(hook_input)
-        self.assertNotIn("secret-token", prompt)
+        self.assertNotIn("priv-token", prompt)
+        self.assertNotIn("log-token", prompt)
         self.assertNotIn("User permit", prompt)
-        self.assertNotIn("weak_deny", prompt)
+        self.assertNotIn("privileged_read", prompt)
         self.assertIn("Agent justification", prompt)
 
     def test_uses_default_permit_words(self) -> None:
@@ -106,19 +130,24 @@ class HookInputTests(unittest.TestCase):
                     "tool_input": {
                         "command": (
                             'CODEX_APPROVER_JUSTIFICATION="inspect logs" '
-                            "CODEX_APPROVER_PERMIT=weak_deny git status"
+                            'CODEX_APPROVER_PERMITS="privileged_read log_read" git status'
                         )
                     },
                 }
             )
         )
-        self.assertEqual(hook_input.permit_level, "weak_deny")
+        self.assertEqual(hook_input.permit_categories, ["privileged_read", "log_read"])
 
 
 class LlmParsingTests(unittest.TestCase):
     def test_parse_json_review(self) -> None:
-        review = common.parse_review('{"category":"deny","reason":"too broad"}')
-        self.assertEqual(review, common.ReviewResult("deny", "too broad"))
+        review = common.parse_review(
+            '{"categories":["package_install","network_fetch"],"reason":"fetches packages"}'
+        )
+        self.assertEqual(
+            review,
+            common.ReviewResult(["package_install", "network_fetch"], "fetches packages"),
+        )
 
     def test_reviewer_prompt_requires_short_reason(self) -> None:
         self.assertIn("Keep the reason to one short sentence.", common.DEVELOPER_INSTRUCTIONS)
@@ -132,7 +161,7 @@ class DaemonTests(unittest.TestCase):
         return common.ApproverConfig(
             model="gpt-5.5",
             reasoning_effort="medium",
-            permit_words={"weak_deny": "weak_deny", "deny": "deny"},
+            permit_words={category: category for category in common.PERMITTABLE_CATEGORIES},
             daemon_port=daemon_port,
         )
 
@@ -140,9 +169,9 @@ class DaemonTests(unittest.TestCase):
         class FakeProxy:
             def review(self, payload):
                 self.payload = payload
-                return {"category": "allow", "reason": "read-only"}
+                return {"categories": ["allow"], "reason": "read-only"}
 
-        hook_input = common.HookInput("/repo", "Bash", {"command": "git status"}, "", "none")
+        hook_input = common.HookInput("/repo", "Bash", {"command": "git status"}, "", [])
         proxy = FakeProxy()
         with mock.patch.object(hook, "ensure_daemon_running") as ensure, mock.patch.object(
             hook,
@@ -150,7 +179,7 @@ class DaemonTests(unittest.TestCase):
             return_value=proxy,
         ):
             review = hook.review_with_daemon(hook_input, self.config())
-        self.assertEqual(review, common.ReviewResult("allow", "read-only"))
+        self.assertEqual(review, common.ReviewResult(["allow"], "read-only"))
         ensure.assert_called_once()
         self.assertEqual(proxy.payload["tool_input"], {"command": "git status"})
 
@@ -171,7 +200,7 @@ class DaemonTests(unittest.TestCase):
         except PermissionError as exc:
             self.skipTest(f"TCP bind is unavailable: {exc}")
         server.register_function(lambda: {"ok": True}, "status")
-        server.register_function(lambda payload: {"category": "allow", "reason": "read-only"}, "review")
+        server.register_function(lambda payload: {"categories": ["allow"], "reason": "read-only"}, "review")
         server.register_function(stop, "stop")
 
         def serve():
@@ -183,7 +212,7 @@ class DaemonTests(unittest.TestCase):
         try:
             config = self.config(daemon_port=server.server_address[1])
             review = hook.review_with_daemon(
-                common.HookInput("/repo", "Bash", {"command": "git status"}, "", "none"),
+                common.HookInput("/repo", "Bash", {"command": "git status"}, "", []),
                 config,
             )
             stop_response = hook.daemon_proxy(config).stop()
@@ -191,7 +220,7 @@ class DaemonTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
-        self.assertEqual(review, common.ReviewResult("allow", "read-only"))
+        self.assertEqual(review, common.ReviewResult(["allow"], "read-only"))
         self.assertEqual(stop_response, {"ok": True})
         self.assertFalse(thread.is_alive())
 
@@ -216,42 +245,62 @@ class DaemonTests(unittest.TestCase):
 
 
 class FinalDecisionTests(unittest.TestCase):
-    def test_weak_deny_requires_permit(self) -> None:
-        review = common.ReviewResult("weak_deny", "needs privileged read")
-        decision = common.final_decision(review, "none", "inspect logs", "Bash")
+    def test_category_requires_permit(self) -> None:
+        review = common.ReviewResult(["privileged_read"], "needs privileged read")
+        decision = common.final_decision(review, [], "inspect logs", "Bash")
         self.assertEqual(decision.behavior, "deny")
-        self.assertIn("ask the user only for the weak_deny permit word", decision.message)
+        self.assertIn("privileged_read", decision.message)
         self.assertIn("Write a brief justification yourself", decision.message)
         self.assertIn("necessary and proportional", decision.message)
         self.assertIn("CODEX_APPROVER_JUSTIFICATION", decision.message)
-        self.assertIn("CODEX_APPROVER_PERMIT", decision.message)
+        self.assertIn("CODEX_APPROVER_PERMITS", decision.message)
         self.assertIn("very start of the Bash command", decision.message)
         self.assertIn("before sudo", decision.message)
-        self.assertEqual(common.final_decision(review, "weak_deny", "inspect logs").behavior, "allow")
-        self.assertEqual(common.final_decision(review, "deny", "inspect logs").behavior, "allow")
+        self.assertEqual(
+            common.final_decision(review, ["privileged_read"], "inspect logs").behavior,
+            "allow",
+        )
+
+    def test_all_categories_must_be_permitted(self) -> None:
+        review = common.ReviewResult(
+            ["package_install", "network_fetch"],
+            "installs packages from the network",
+        )
+        decision = common.final_decision(review, ["package_install"], "install test dependency", "Bash")
+        self.assertEqual(decision.behavior, "deny")
+        self.assertIn("network_fetch", decision.message)
+        self.assertEqual(
+            common.final_decision(
+                review,
+                ["package_install", "network_fetch"],
+                "install test dependency",
+            ).behavior,
+            "allow",
+        )
 
     def test_permit_requires_justification(self) -> None:
-        review = common.ReviewResult("weak_deny", "needs privileged read")
-        decision = common.final_decision(review, "weak_deny", "", "Bash")
+        review = common.ReviewResult(["privileged_read"], "needs privileged read")
+        decision = common.final_decision(review, ["privileged_read"], "", "Bash")
         self.assertEqual(decision.behavior, "deny")
-        self.assertIn("requires an agent-written justification", decision.message)
-        self.assertIn("ask the user only for the weak_deny permit word", decision.message)
-        self.assertIn("do not invent the permit word", decision.message)
+        self.assertIn("require an agent-written justification", decision.message)
+        self.assertIn("privileged_read", decision.message)
+        self.assertIn("do not invent permit words", decision.message)
 
     def test_non_bash_permit_denial_explains_supported_channel(self) -> None:
-        review = common.ReviewResult("deny", "writes outside workspace")
-        decision = common.final_decision(review, "none", "", "apply_patch")
+        review = common.ReviewResult(["write_outside_workspace"], "writes outside workspace")
+        decision = common.final_decision(review, [], "", "apply_patch")
         self.assertEqual(decision.behavior, "deny")
         self.assertIn("only accepts justification and permit words through Bash", decision.message)
         self.assertIn("do not attach CODEX_APPROVER_JUSTIFICATION", decision.message)
+        self.assertIn("CODEX_APPROVER_PERMITS", decision.message)
         self.assertIn("narrow the request", decision.message)
 
-    def test_strong_deny_cannot_be_permitted(self) -> None:
-        review = common.ReviewResult("strong_deny", "destructive")
-        decision = common.final_decision(review, "deny", "cleanup")
+    def test_blocked_categories_cannot_be_permitted(self) -> None:
+        review = common.ReviewResult(["destructive_action"], "destructive")
+        decision = common.final_decision(review, ["package_install"], "cleanup")
         self.assertEqual(decision.behavior, "deny")
         self.assertIn("cannot be permitted", decision.message)
-        self.assertIn("Do not ask the user for a permit word", decision.message)
+        self.assertIn("Do not ask the user for permit words", decision.message)
 
 
 class HookMainTests(unittest.TestCase):
@@ -275,7 +324,7 @@ class HookMainTests(unittest.TestCase):
             ), mock.patch.object(
                 hook,
                 "review_with_daemon",
-                return_value=common.ReviewResult("allow", "read-only"),
+                return_value=common.ReviewResult(["allow"], "read-only"),
             ):
                 code = hook.run_hook()
 
