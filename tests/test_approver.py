@@ -253,6 +253,23 @@ class DaemonTests(unittest.TestCase):
         self.assertTrue(proxy.called)
         self.assertEqual(json.loads(stdout.getvalue()), {"ok": True})
 
+    def test_spawn_daemon_appends_to_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "codex-ai-approver.log"
+            with mock.patch.object(hook, "DAEMON_LOG_PATH", log_path), mock.patch.object(
+                hook.subprocess,
+                "Popen",
+            ) as popen:
+                hook._spawn_daemon()
+
+            self.assertTrue(log_path.exists())
+
+        popen.assert_called_once()
+        kwargs = popen.call_args.kwargs
+        self.assertEqual(kwargs["stdout"].name, str(log_path))
+        self.assertEqual(kwargs["stdout"].mode, "a")
+        self.assertEqual(kwargs["stderr"], hook.subprocess.STDOUT)
+
 
 class FinalDecisionTests(unittest.TestCase):
     def test_category_requires_permit(self) -> None:

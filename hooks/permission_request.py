@@ -9,6 +9,7 @@ import xmlrpc.client
 
 
 DAEMON_HOST = "localhost"
+DAEMON_LOG_PATH = Path("~/codex-ai-approver.log")
 DAEMON_STARTUP_TIMEOUT_SECONDS = 30
 HOOKS_DIR = Path(__file__).resolve().parent
 if str(HOOKS_DIR) not in sys.path:
@@ -77,14 +78,15 @@ def daemon_proxy(config: ApproverConfig) -> xmlrpc.client.ServerProxy:
 
 def _spawn_daemon() -> None:
     command = [sys.executable, str(Path(__file__).resolve()), "--daemon"]
-    subprocess.Popen(
-        command,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
-        start_new_session=True,
-)
+    with DAEMON_LOG_PATH.expanduser().open("a", encoding="utf-8") as log:
+        subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            close_fds=True,
+            start_new_session=True,
+        )
 
 
 def daemon_stop_cli() -> int:
