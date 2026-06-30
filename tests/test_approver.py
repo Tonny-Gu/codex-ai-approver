@@ -149,6 +149,16 @@ class LlmParsingTests(unittest.TestCase):
             common.ReviewResult(["package_install", "network_fetch"], "fetches packages"),
         )
 
+    def test_parse_review_deduplicates_categories(self) -> None:
+        review = common.parse_review(
+            '{"categories":["package_install","package_install"],"reason":"fetches packages"}'
+        )
+        self.assertEqual(review.categories, ["package_install"])
+
+    def test_output_schema_omits_unsupported_unique_items(self) -> None:
+        categories_schema = common.OUTPUT_SCHEMA["properties"]["categories"]
+        self.assertNotIn("uniqueItems", categories_schema)
+
     def test_reviewer_prompt_requires_short_reason(self) -> None:
         self.assertIn("Keep the reason to one short sentence.", common.DEVELOPER_INSTRUCTIONS)
         self.assertIn("necessary and proportional", common.DEVELOPER_INSTRUCTIONS)

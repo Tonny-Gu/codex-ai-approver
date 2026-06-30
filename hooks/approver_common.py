@@ -123,7 +123,6 @@ OUTPUT_SCHEMA: dict[str, Any] = {
                 "enum": list(REVIEW_CATEGORIES),
             },
             "minItems": 1,
-            "uniqueItems": True,
         },
         "reason": {"type": "string"},
     },
