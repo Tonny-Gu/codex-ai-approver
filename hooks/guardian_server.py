@@ -210,6 +210,7 @@ def build_guardian_prompt(
         {
             "request_id": request.request_id,
             "turn_id": request.turn_id,
+            "current_user_turn": snapshot.current_user_turn,
             "cwd": request.cwd or "unknown",
             "tool": request.tool_name,
             "tool_input": request.tool_input,
@@ -217,8 +218,9 @@ def build_guardian_prompt(
         for request in requests
     ]
     compact_note = (
-        "This context window begins with a compacted summary. Authorization "
-        "inferred only from that summary is capped at medium."
+        "This context window begins with a compacted summary. All prior "
+        "positive authorization grants ended at compaction; task-level "
+        "authorization inferred only from that summary is capped at medium."
         if snapshot.compacted
         else "This is the initial, uncompacted context window."
     )

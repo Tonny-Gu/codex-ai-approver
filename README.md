@@ -51,6 +51,8 @@ Correctness does not depend on a daemon-held authorization ledger.
 The deterministic transcript retains:
 
 - Direct user messages.
+- A deterministic `user_turn` ordinal for each direct user turn in the current
+  context window.
 - Structured tool calls, including material arguments and targets.
 - Bounded execution status metadata, without raw tool output.
 - Earlier guardian assessments emitted by this hook.
@@ -60,12 +62,23 @@ It excludes assistant prose and reasoning. Long individual values are
 deterministically truncated with their SHA-256 digest so the omitted value
 cannot silently change.
 
+Positive authorization persists across user turns by default, but only within
+the current context window and until a later user message narrows or revokes
+it. A user can instead limit authorization to the current user turn or to a
+stated number of user turns. The granting turn counts as the first turn unless
+the user explicitly specifies a different start.
+
 After context compaction, pre-compaction user messages and tool records are no
-longer direct evidence. Only the compacted summary is retained. Authorization
-inferred from a compacted summary or earlier guardian assessment is capped at
-`medium`; `high` authorization requires a direct user message in the current
-context window. Consequently, high-risk actions require fresh user
-authorization after compaction.
+longer direct evidence. All prior positive grants end. The compacted summary
+may independently support the current task in substance at no more than
+`medium`, but it cannot preserve an expired, revoked, or turn-bounded grant.
+`high` authorization requires a direct user message in the current context
+window.
+
+An expired grant produces no affirmative authorization. Earlier tool use and
+guardian assessments cannot extend it. A still-active user prohibition is
+classified separately and remains effective until the user explicitly lifts
+it.
 
 The pending action is always supplied separately and in full.
 
@@ -92,10 +105,16 @@ Risk levels are:
 
 User authorization levels are:
 
-- `unknown`
+- `prohibited`
+- `none`
 - `low`
 - `medium`
 - `high`
+
+`prohibited` means the action conflicts with an applicable user prohibition or
+revocation. `none` means there is no reliable affirmative authorization,
+including when a bounded grant has expired. `low`, `medium`, and `high` are
+increasing degrees of affirmative authorization.
 
 Risk includes both the likely intended effect and execution uncertainty. The
 guardian evaluates execution risk as the probability of unintended execution
@@ -115,7 +134,9 @@ statement and can never independently establish `high` authorization.
 
 When `outcome_policy` is not configured, the guardian uses:
 
-- `low` risk: allow.
+- `prohibited` authorization: deny regardless of risk.
+- `none` authorization: deny.
+- `low` risk: authorization must be at least `low`.
 - `medium` risk: authorization must be at least `medium`, and the guardian must
   still find the action bounded and proportionate.
 - `high` risk: authorization must be `high`, but that is only a necessary

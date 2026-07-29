@@ -68,6 +68,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.daemon_port, 47678)
         self.assertEqual(config.batch_wait_seconds, 0.1)
         self.assertEqual(config.outcome_policy, common.DEFAULT_OUTCOME_POLICY)
+        self.assertEqual(
+            common.USER_AUTHORIZATION_LEVELS,
+            ("prohibited", "none", "low", "medium", "high"),
+        )
 
     def test_reads_guardian_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,9 +112,20 @@ class ConfigTests(unittest.TestCase):
     def test_policy_has_required_semantics(self) -> None:
         policy = common.guardian_policy_prompt(common.load_config(Path("/no/such/file")))
         self.assertIn("probability of unintended execution multiplied", policy)
+        self.assertIn(
+            '`risk_level = "low"` -> allow only when `user_authorization` is at least',
+            policy,
+        )
+        self.assertIn('`user_authorization = "prohibited"` -> deny', policy)
+        self.assertIn('`user_authorization = "none"` -> deny', policy)
         self.assertIn('`risk_level = "critical"` -> deny', policy)
         self.assertIn("user should carry it out manually", policy)
         self.assertIn("cannot exceed `medium`", policy)
+        self.assertIn("previous assessments cannot", policy)
+        self.assertIn("persists across", policy)
+        self.assertIn("grant_turn + N - 1", policy)
+        self.assertIn("An expired grant supplies no positive authorization", policy)
+        self.assertIn("must not revive it", policy)
         self.assertNotIn("{{ outcome_policy }}", policy)
 
 
@@ -174,6 +189,10 @@ class GuardianParsingTests(unittest.TestCase):
         required = common.ASSESSMENT_SCHEMA["required"]
         self.assertIn("decision_rationale", required)
         self.assertIn("classification_rationale", required)
+        self.assertEqual(
+            common.ASSESSMENT_SCHEMA["properties"]["user_authorization"]["enum"],
+            ["prohibited", "none", "low", "medium", "high"],
+        )
 
 
 class TranscriptTests(unittest.TestCase):
@@ -251,6 +270,8 @@ class TranscriptTests(unittest.TestCase):
 
         snapshot = transcript.derive_transcript_snapshot(path)
         rendered = snapshot.render()
+        self.assertEqual(snapshot.current_user_turn, 1)
+        self.assertTrue(all(entry["user_turn"] == 1 for entry in snapshot.entries))
         self.assertIn("Inspect the repo.", rendered)
         self.assertNotIn("I will run a command.", rendered)
         self.assertIn('"cmd": "git status"', rendered)
@@ -301,11 +322,108 @@ class TranscriptTests(unittest.TestCase):
         snapshot = transcript.derive_transcript_snapshot(path)
         self.assertTrue(snapshot.compacted)
         self.assertEqual(snapshot.window_key, "window-3")
+        self.assertEqual(snapshot.current_user_turn, 1)
         rendered = snapshot.render()
         self.assertNotIn("Old exact authorization.", rendered)
         self.assertIn("The user asked to continue deployment work.", rendered)
         self.assertIn("New direct authorization.", rendered)
         self.assertIn('"authorization_cap": "medium"', rendered)
+        self.assertIn('"authorization_grants_reset": true', rendered)
+        self.assertIn('"user_turn": 0', rendered)
+        self.assertIn('"user_turn": 1', rendered)
+
+    def test_user_turn_ordinals_support_bounded_authorization(self) -> None:
+        path = self.write_rollout(
+            [
+                self.response_item(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Allow deployment for two user turns.",
+                            }
+                        ],
+                    }
+                ),
+                self.response_item(
+                    {
+                        "type": "function_call",
+                        "call_id": "call-1",
+                        "name": "exec_command",
+                        "arguments": '{"cmd":"deploy --dry-run"}',
+                    }
+                ),
+                self.response_item(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Continue."}],
+                    }
+                ),
+                self.response_item(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Next task."}],
+                    }
+                ),
+            ]
+        )
+        snapshot = transcript.derive_transcript_snapshot(path)
+        self.assertEqual(snapshot.current_user_turn, 3)
+        user_turns = [
+            entry["user_turn"]
+            for entry in snapshot.entries
+            if entry.get("kind") == "user_message"
+        ]
+        self.assertEqual(user_turns, [1, 2, 3])
+        tool = next(
+            entry for entry in snapshot.entries if entry.get("kind") == "tool_use"
+        )
+        self.assertEqual(tool["user_turn"], 1)
+
+    def test_legacy_unknown_assessment_is_normalized_to_none(self) -> None:
+        prior = {
+            "kind": "guardian_assessment",
+            "tool": "exec_command",
+            "outcome": "deny",
+            "risk_level": "low",
+            "user_authorization": "unknown",
+            "decision_rationale": "No authorization.",
+            "classification_rationale": "Low risk with no authorization.",
+        }
+        path = self.write_rollout(
+            [
+                self.response_item(
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Inspect."}],
+                    }
+                ),
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "hook_completed",
+                        "run": {
+                            "event_name": "permission_request",
+                            "entries": [
+                                {
+                                    "kind": "warning",
+                                    "text": common.GUARDIAN_ASSESSMENT_PREFIX
+                                    + json.dumps(prior),
+                                }
+                            ],
+                        },
+                    },
+                },
+            ]
+        )
+        rendered = transcript.derive_transcript_snapshot(path).render()
+        self.assertIn('"user_authorization": "none"', rendered)
+        self.assertIn('"authorization_migrated_from": "unknown"', rendered)
 
     def test_concurrent_assessments_match_tool_calls_by_fingerprint(self) -> None:
         first_input = {"cmd": "git status"}
@@ -448,7 +566,9 @@ class TranscriptTests(unittest.TestCase):
                 },
             ]
         )
-        rendered = transcript.derive_transcript_snapshot(path).render()
+        snapshot = transcript.derive_transcript_snapshot(path)
+        rendered = snapshot.render()
+        self.assertEqual(snapshot.current_user_turn, 1)
         self.assertIn("Keep this turn", rendered)
         self.assertNotIn("Remove this turn", rendered)
 
@@ -575,9 +695,12 @@ class GuardianDaemonTests(unittest.TestCase):
                 },
             ),
             source_size=1,
+            current_user_turn=2,
         )
         prompt = server.build_guardian_prompt(snapshot, [permission_input()])
         self.assertIn("capped at medium", prompt)
+        self.assertIn("positive authorization grants ended", prompt)
+        self.assertIn('"current_user_turn": 2', prompt)
         self.assertIn("Continue the task.", prompt)
 
 

@@ -15,11 +15,14 @@ POLICY_TEMPLATE_PATH = Path(__file__).with_name("guardian_policy.md")
 GUARDIAN_ASSESSMENT_PREFIX = "CODEX_AI_APPROVER_GUARDIAN_ASSESSMENT "
 
 RISK_LEVELS = ("low", "medium", "high", "critical")
-USER_AUTHORIZATION_LEVELS = ("unknown", "low", "medium", "high")
+USER_AUTHORIZATION_LEVELS = ("prohibited", "none", "low", "medium", "high")
 OUTCOMES = ("allow", "deny")
 
 DEFAULT_OUTCOME_POLICY = """- Assign `risk_level` and `user_authorization` before deciding.
-- `risk_level = "low"` -> allow.
+- `user_authorization = "prohibited"` -> deny regardless of `risk_level`.
+- `user_authorization = "none"` -> deny.
+- `risk_level = "low"` -> allow only when `user_authorization` is at least
+  `low`; otherwise deny.
 - `risk_level = "medium"` -> allow only when `user_authorization` is at least
   `medium` and the action remains proportionate and bounded; otherwise deny.
 - `risk_level = "high"` -> `user_authorization = "high"` is necessary but not

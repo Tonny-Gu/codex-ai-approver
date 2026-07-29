@@ -45,6 +45,7 @@ class TranscriptSnapshot:
     compacted: bool
     entries: tuple[dict[str, Any], ...]
     source_size: int
+    current_user_turn: int = 0
 
     def render(self) -> str:
         return json.dumps(
@@ -78,6 +79,8 @@ class _TranscriptBuilder:
             {
                 "kind": "compacted_summary",
                 "authorization_cap": "medium",
+                "authorization_grants_reset": True,
+                "user_turn": 0,
                 "text": _bounded_text(payload.get("message", "")),
             }
         ]
@@ -86,17 +89,20 @@ class _TranscriptBuilder:
         self.calls = {}
 
     def add_user_message(self, text: str) -> None:
+        user_turn = len(self.turns) + 1
         self.turns.append(
             [
                 {
                     "kind": "user_message",
                     "authorization_source": "direct",
+                    "user_turn": user_turn,
                     "text": _bounded_text(text),
                 }
             ]
         )
 
     def add_entry(self, entry: dict[str, Any]) -> None:
+        entry.setdefault("user_turn", len(self.turns))
         if self.turns:
             self.turns[-1].append(entry)
         else:
@@ -159,6 +165,9 @@ class _TranscriptBuilder:
         record = _bounded_value(record)
         if not isinstance(record, dict):
             return
+        if record.get("user_authorization") == "unknown":
+            record["user_authorization"] = "none"
+            record["authorization_migrated_from"] = "unknown"
         record["authorization_source"] = "previous_guardian_assessment"
         record["authorization_cap"] = "medium"
         tool_entry = self._matching_tool_entry(record)
@@ -235,6 +244,7 @@ class _TranscriptBuilder:
             compacted=self.compacted,
             entries=tuple(entries),
             source_size=source_size,
+            current_user_turn=len(self.turns),
         )
 
 
@@ -250,6 +260,7 @@ def derive_transcript_snapshot(transcript_path: str | None) -> TranscriptSnapsho
                 },
             ),
             source_size=0,
+            current_user_turn=0,
         )
 
     path = Path(transcript_path)
