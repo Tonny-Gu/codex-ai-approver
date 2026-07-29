@@ -52,7 +52,6 @@ def permission_input(
         session_id="session-1",
         turn_id="turn-1",
         agent_id=None,
-        agent_type=None,
         transcript_path=transcript_path,
         cwd="/repo",
         tool_name=tool_name,
@@ -121,11 +120,10 @@ class ConfigTests(unittest.TestCase):
         self.assertIn('`risk_level = "critical"` -> deny', policy)
         self.assertIn("user should carry it out manually", policy)
         self.assertIn("cannot exceed `medium`", policy)
-        self.assertIn("previous assessments cannot", policy)
+        self.assertIn("Hook messages must not revive an expired grant", policy)
         self.assertIn("persists across", policy)
         self.assertIn("grant_turn + N - 1", policy)
         self.assertIn("An expired grant supplies no positive authorization", policy)
-        self.assertIn("must not revive it", policy)
         self.assertNotIn("{{ outcome_policy }}", policy)
 
 
@@ -207,17 +205,11 @@ class TranscriptTests(unittest.TestCase):
     def response_item(self, payload: dict) -> dict:
         return {"type": "response_item", "payload": payload}
 
-    def test_retains_user_tool_arguments_status_and_guardian_assessment(self) -> None:
-        prior = {
-            "kind": "guardian_assessment",
-            "turn_id": "turn-1",
-            "tool": "exec_command",
-            "outcome": "allow",
-            "risk_level": "low",
-            "user_authorization": "medium",
-            "decision_rationale": "Allowed.",
-            "classification_rationale": "Low and authorized.",
-        }
+    def test_retains_user_and_all_permission_hook_messages(self) -> None:
+        guardian_message = common.guardian_assessment_system_message(
+            permission_input(),
+            assessment(),
+        )
         path = self.write_rollout(
             [
                 self.response_item(
@@ -239,7 +231,7 @@ class TranscriptTests(unittest.TestCase):
                         "type": "function_call",
                         "call_id": "call-1",
                         "name": "exec_command",
-                        "arguments": '{"cmd":"git status","workdir":"/repo"}',
+                        "arguments": '{"cmd":"ignored historical tool"}',
                     }
                 ),
                 self.response_item(
@@ -258,9 +250,9 @@ class TranscriptTests(unittest.TestCase):
                             "entries": [
                                 {
                                     "kind": "warning",
-                                    "text": common.GUARDIAN_ASSESSMENT_PREFIX
-                                    + json.dumps(prior),
-                                }
+                                    "text": guardian_message,
+                                },
+                                {"kind": "warning", "text": "Other hook context."},
                             ],
                         },
                     },
@@ -274,12 +266,16 @@ class TranscriptTests(unittest.TestCase):
         self.assertTrue(all(entry["user_turn"] == 1 for entry in snapshot.entries))
         self.assertIn("Inspect the repo.", rendered)
         self.assertNotIn("I will run a command.", rendered)
-        self.assertIn('"cmd": "git status"', rendered)
-        self.assertIn('"execution_status": "returned"', rendered)
-        self.assertIn('"approval": "allow"', rendered)
+        self.assertNotIn("ignored historical tool", rendered)
         self.assertNotIn("large output intentionally ignored", rendered)
-        self.assertIn('"kind": "guardian_assessment"', rendered)
-        self.assertIn('"authorization_cap": "medium"', rendered)
+        hook_messages = [
+            entry for entry in snapshot.entries if entry.get("kind") == "hook_message"
+        ]
+        self.assertEqual(len(hook_messages), 2)
+        self.assertIn("Tool: Bash", hook_messages[0]["text"])
+        self.assertIn('"command": "git status"', hook_messages[0]["text"])
+        self.assertIn("Outcome: allow", hook_messages[0]["text"])
+        self.assertEqual(hook_messages[1]["text"], "Other hook context.")
 
     def test_compaction_keeps_only_summary_then_new_evidence(self) -> None:
         path = self.write_rollout(
@@ -349,12 +345,21 @@ class TranscriptTests(unittest.TestCase):
                 ),
                 self.response_item(
                     {
-                        "type": "function_call",
-                        "call_id": "call-1",
-                        "name": "exec_command",
-                        "arguments": '{"cmd":"deploy --dry-run"}',
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Working."}],
                     }
                 ),
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "hook_completed",
+                        "run": {
+                            "event_name": "permission_request",
+                            "entries": [{"text": "Prior hook context."}],
+                        },
+                    },
+                },
                 self.response_item(
                     {
                         "type": "message",
@@ -379,21 +384,12 @@ class TranscriptTests(unittest.TestCase):
             if entry.get("kind") == "user_message"
         ]
         self.assertEqual(user_turns, [1, 2, 3])
-        tool = next(
-            entry for entry in snapshot.entries if entry.get("kind") == "tool_use"
+        hook_message = next(
+            entry for entry in snapshot.entries if entry.get("kind") == "hook_message"
         )
-        self.assertEqual(tool["user_turn"], 1)
+        self.assertEqual(hook_message["user_turn"], 1)
 
-    def test_legacy_unknown_assessment_is_normalized_to_none(self) -> None:
-        prior = {
-            "kind": "guardian_assessment",
-            "tool": "exec_command",
-            "outcome": "deny",
-            "risk_level": "low",
-            "user_authorization": "unknown",
-            "decision_rationale": "No authorization.",
-            "classification_rationale": "Low risk with no authorization.",
-        }
+    def test_hook_messages_are_retained_without_prefix_or_parsing(self) -> None:
         path = self.write_rollout(
             [
                 self.response_item(
@@ -410,112 +406,40 @@ class TranscriptTests(unittest.TestCase):
                         "run": {
                             "event_name": "permission_request",
                             "entries": [
-                                {
-                                    "kind": "warning",
-                                    "text": common.GUARDIAN_ASSESSMENT_PREFIX
-                                    + json.dumps(prior),
-                                }
+                                {"kind": "warning", "text": "Plain hook note."},
+                                {"text": '{"arbitrary":"JSON remains text"}'},
+                                {"text": ""},
+                                {"text": 123},
                             ],
+                        },
+                    },
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "hook_completed",
+                        "run": {
+                            "event_name": "post_tool_use",
+                            "entries": [{"text": "Other lifecycle hook context."}],
                         },
                     },
                 },
             ]
         )
-        rendered = transcript.derive_transcript_snapshot(path).render()
-        self.assertIn('"user_authorization": "none"', rendered)
-        self.assertIn('"authorization_migrated_from": "unknown"', rendered)
-
-    def test_concurrent_assessments_match_tool_calls_by_fingerprint(self) -> None:
-        first_input = {"cmd": "git status"}
-        second_input = {"cmd": "git push"}
-        first_record = {
-            "kind": "guardian_assessment",
-            "tool": "exec_command",
-            "action_fingerprint": common.canonical_action_fingerprint(
-                "exec_command",
-                first_input,
-            ),
-            "outcome": "allow",
-        }
-        second_record = {
-            "kind": "guardian_assessment",
-            "tool": "exec_command",
-            "action_fingerprint": common.canonical_action_fingerprint(
-                "exec_command",
-                second_input,
-            ),
-            "outcome": "deny",
-        }
-
-        def hook_event(record: dict) -> dict:
-            return {
-                "type": "event_msg",
-                "payload": {
-                    "type": "hook_completed",
-                    "run": {
-                        "event_name": "permission_request",
-                        "entries": [
-                            {
-                                "kind": "warning",
-                                "text": common.GUARDIAN_ASSESSMENT_PREFIX
-                                + json.dumps(record),
-                            }
-                        ],
-                    },
-                },
-            }
-
-        path = self.write_rollout(
-            [
-                self.response_item(
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": "Check and push."}],
-                    }
-                ),
-                self.response_item(
-                    {
-                        "type": "function_call",
-                        "call_id": "call-1",
-                        "name": "exec_command",
-                        "arguments": json.dumps(first_input),
-                    }
-                ),
-                self.response_item(
-                    {
-                        "type": "function_call",
-                        "call_id": "call-2",
-                        "name": "exec_command",
-                        "arguments": json.dumps(second_input),
-                    }
-                ),
-                hook_event(second_record),
-                hook_event(first_record),
-                self.response_item(
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-1",
-                        "output": "ok",
-                    }
-                ),
-                self.response_item(
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-2",
-                        "output": "denied",
-                    }
-                ),
-            ]
-        )
         snapshot = transcript.derive_transcript_snapshot(path)
-        tools = [entry for entry in snapshot.entries if entry.get("kind") == "tool_use"]
-        self.assertEqual(tools[0]["approval"], "allow")
-        self.assertEqual(tools[0]["execution_status"], "returned")
-        self.assertEqual(tools[1]["approval"], "deny")
-        self.assertEqual(tools[1]["execution_status"], "not_run")
+        hook_messages = [
+            entry for entry in snapshot.entries if entry.get("kind") == "hook_message"
+        ]
+        self.assertEqual(
+            [entry["text"] for entry in hook_messages],
+            [
+                "Plain hook note.",
+                '{"arbitrary":"JSON remains text"}',
+                "Other lifecycle hook context.",
+            ],
+        )
 
-    def test_contextual_user_messages_are_excluded(self) -> None:
+    def test_all_role_user_messages_are_retained(self) -> None:
         path = self.write_rollout(
             [
                 self.response_item(
@@ -540,7 +464,7 @@ class TranscriptTests(unittest.TestCase):
             ]
         )
         rendered = transcript.derive_transcript_snapshot(path).render()
-        self.assertNotIn("not a user instruction", rendered)
+        self.assertIn("not a user instruction", rendered)
         self.assertIn("Real user request", rendered)
 
     def test_thread_rollback_removes_rolled_back_user_turns(self) -> None:
@@ -728,17 +652,19 @@ class HookTests(unittest.TestCase):
         self.assertEqual(result, assessment())
         self.assertEqual(proxy.payload["tool_input"], {"command": "git status"})
 
-    def test_allow_and_deny_both_emit_guardian_record(self) -> None:
+    def test_allow_and_deny_emit_self_contained_messages(self) -> None:
         allowed = common.permission_request_output(permission_input(), assessment())
         denied = common.permission_request_output(
             permission_input(),
             assessment("deny"),
         )
-        self.assertTrue(
-            allowed["systemMessage"].startswith(common.GUARDIAN_ASSESSMENT_PREFIX)
-        )
-        self.assertTrue(
-            denied["systemMessage"].startswith(common.GUARDIAN_ASSESSMENT_PREFIX)
+        self.assertIn("Tool: Bash", allowed["systemMessage"])
+        self.assertIn('"command": "git status"', allowed["systemMessage"])
+        self.assertIn("Outcome: allow", allowed["systemMessage"])
+        self.assertIn("Outcome: deny", denied["systemMessage"])
+        self.assertIn(
+            "Authorization assessed at the time: medium",
+            allowed["systemMessage"],
         )
         self.assertNotIn(
             "message",

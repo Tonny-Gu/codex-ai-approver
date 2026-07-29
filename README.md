@@ -50,17 +50,15 @@ Correctness does not depend on a daemon-held authorization ledger.
 
 The deterministic transcript retains:
 
-- Direct user messages.
-- A deterministic `user_turn` ordinal for each direct user turn in the current
+- Messages recorded by the rollout with role `user`.
+- A deterministic `user_turn` ordinal for each such message in the current
   context window.
-- Structured tool calls, including material arguments and targets.
-- Bounded execution status metadata, without raw tool output.
-- Earlier guardian assessments emitted by this hook.
+- Text messages emitted by lifecycle hooks. This hook's own message is
+  self-contained and includes the exact action and complete assessment.
 - The compacted summary at the start of a new context window.
 
-It excludes assistant prose and reasoning. Long individual values are
-deterministically truncated with their SHA-256 digest so the omitted value
-cannot silently change.
+It excludes assistant prose, reasoning, and standalone historical tool records.
+Retained text is passed to the guardian unchanged.
 
 Positive authorization persists across user turns by default, but only within
 the current context window and until a later user message narrows or revokes
@@ -68,17 +66,16 @@ it. A user can instead limit authorization to the current user turn or to a
 stated number of user turns. The granting turn counts as the first turn unless
 the user explicitly specifies a different start.
 
-After context compaction, pre-compaction user messages and tool records are no
+After context compaction, pre-compaction user messages and hook messages are no
 longer direct evidence. All prior positive grants end. The compacted summary
 may independently support the current task in substance at no more than
 `medium`, but it cannot preserve an expired, revoked, or turn-bounded grant.
 `high` authorization requires a direct user message in the current context
 window.
 
-An expired grant produces no affirmative authorization. Earlier tool use and
-guardian assessments cannot extend it. A still-active user prohibition is
-classified separately and remains effective until the user explicitly lifts
-it.
+An expired grant produces no affirmative authorization. Hook messages cannot
+extend it. A still-active user prohibition is classified separately and
+remains effective until the user explicitly lifts it.
 
 The pending action is always supplied separately and in full.
 
@@ -125,10 +122,12 @@ Both allow and deny outcomes include two rationales. The decision rationale
 explains the outcome; the classification rationale explains both
 `risk_level` and `user_authorization`.
 
-Guardian assessments are emitted as transcript-visible hook records. This lets
-later assessments recover earlier decisions deterministically from the Codex
-rollout. A previous guardian decision is model evidence rather than a user
-statement and can never independently establish `high` authorization.
+Guardian assessments are emitted as self-contained, transcript-visible hook
+messages containing the exact tool input, classifications, outcome, and
+rationales. Later assessments retain hook messages as bounded text without
+parsing a private record format. A previous guardian decision is model evidence
+rather than a user statement and can never independently establish `high`
+authorization.
 
 ## Default Outcome Policy
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -12,7 +11,6 @@ import uuid
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 POLICY_TEMPLATE_PATH = Path(__file__).with_name("guardian_policy.md")
-GUARDIAN_ASSESSMENT_PREFIX = "CODEX_AI_APPROVER_GUARDIAN_ASSESSMENT "
 
 RISK_LEVELS = ("low", "medium", "high", "critical")
 USER_AUTHORIZATION_LEVELS = ("prohibited", "none", "low", "medium", "high")
@@ -96,7 +94,6 @@ class PermissionRequestInput:
     session_id: str
     turn_id: str
     agent_id: str | None
-    agent_type: str | None
     transcript_path: str | None
     cwd: str
     tool_name: str
@@ -186,11 +183,10 @@ def parse_permission_request_input(stdin_data: str) -> PermissionRequestInput:
         session_id=session_id,
         turn_id=turn_id,
         agent_id=_optional_string(raw.get("agent_id")),
-        agent_type=_optional_string(raw.get("agent_type")),
         transcript_path=_optional_string(raw.get("transcript_path")),
         cwd=_string(raw.get("cwd")),
         tool_name=tool_name,
-        tool_input=deepcopy(tool_input),
+        tool_input=tool_input,
     )
 
 
@@ -208,36 +204,10 @@ def parse_guardian_assessments(
     expected = set(expected_request_ids)
     parsed: dict[str, GuardianAssessment] = {}
     for raw in raw_assessments:
-        if not isinstance(raw, dict):
-            raise ValueError("each guardian assessment must be an object")
-        request_id = _string(raw.get("request_id"))
-        if request_id not in expected:
-            raise ValueError(f"unexpected guardian request_id: {request_id!r}")
+        request_id, assessment = _parse_guardian_assessment(raw, expected)
         if request_id in parsed:
             raise ValueError(f"duplicate guardian request_id: {request_id!r}")
-
-        risk_level = _enum_value(raw.get("risk_level"), RISK_LEVELS, "risk_level")
-        user_authorization = _enum_value(
-            raw.get("user_authorization"),
-            USER_AUTHORIZATION_LEVELS,
-            "user_authorization",
-        )
-        outcome = _enum_value(raw.get("outcome"), OUTCOMES, "outcome")
-        decision_rationale = _as_nonempty_str(
-            raw.get("decision_rationale"),
-            "decision_rationale",
-        )
-        classification_rationale = _as_nonempty_str(
-            raw.get("classification_rationale"),
-            "classification_rationale",
-        )
-        parsed[request_id] = GuardianAssessment(
-            risk_level=risk_level,
-            user_authorization=user_authorization,
-            outcome=outcome,
-            decision_rationale=decision_rationale,
-            classification_rationale=classification_rationale,
-        )
+        parsed[request_id] = assessment
 
     missing = expected - set(parsed)
     if missing:
@@ -249,6 +219,35 @@ def parse_guardian_assessments(
     return parsed
 
 
+def _parse_guardian_assessment(
+    raw: Any,
+    expected_request_ids: set[str],
+) -> tuple[str, GuardianAssessment]:
+    if not isinstance(raw, dict):
+        raise ValueError("each guardian assessment must be an object")
+    request_id = _string(raw.get("request_id"))
+    if request_id not in expected_request_ids:
+        raise ValueError(f"unexpected guardian request_id: {request_id!r}")
+
+    return request_id, GuardianAssessment(
+        risk_level=_enum_value(raw.get("risk_level"), RISK_LEVELS, "risk_level"),
+        user_authorization=_enum_value(
+            raw.get("user_authorization"),
+            USER_AUTHORIZATION_LEVELS,
+            "user_authorization",
+        ),
+        outcome=_enum_value(raw.get("outcome"), OUTCOMES, "outcome"),
+        decision_rationale=_as_nonempty_str(
+            raw.get("decision_rationale"),
+            "decision_rationale",
+        ),
+        classification_rationale=_as_nonempty_str(
+            raw.get("classification_rationale"),
+            "classification_rationale",
+        ),
+    )
+
+
 def parse_guardian_assessment_mapping(
     payload: Any,
     request_id: str,
@@ -257,62 +256,30 @@ def parse_guardian_assessment_mapping(
         raise ValueError("guardian daemon response must be an object")
     item = dict(payload)
     item["request_id"] = request_id
-    parsed = parse_guardian_assessments(
-        json.dumps({"assessments": [item]}, ensure_ascii=False),
-        [request_id],
-    )
-    return parsed[request_id]
-
-
-def action_fingerprint(hook_input: PermissionRequestInput) -> str:
-    return canonical_action_fingerprint(
-        hook_input.tool_name,
-        hook_input.tool_input,
-    )
-
-
-def canonical_action_fingerprint(tool_name: str, tool_input: Any) -> str:
-    payload = {
-        "tool_name": tool_name,
-        "tool_input": tool_input,
-    }
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode()
-    return sha256(encoded).hexdigest()[:24]
-
-
-def guardian_assessment_record(
-    hook_input: PermissionRequestInput,
-    assessment: GuardianAssessment,
-) -> dict[str, Any]:
-    return {
-        "kind": "guardian_assessment",
-        "turn_id": hook_input.turn_id,
-        "tool": hook_input.tool_name,
-        "action_fingerprint": action_fingerprint(hook_input),
-        "risk_level": assessment.risk_level,
-        "user_authorization": assessment.user_authorization,
-        "outcome": assessment.outcome,
-        "decision_rationale": assessment.decision_rationale,
-        "classification_rationale": assessment.classification_rationale,
-    }
+    _, assessment = _parse_guardian_assessment(item, {request_id})
+    return assessment
 
 
 def guardian_assessment_system_message(
     hook_input: PermissionRequestInput,
     assessment: GuardianAssessment,
 ) -> str:
-    payload = json.dumps(
-        guardian_assessment_record(hook_input, assessment),
+    tool_input = json.dumps(
+        hook_input.tool_input,
+        indent=2,
         sort_keys=True,
-        separators=(",", ":"),
         ensure_ascii=False,
     )
-    return f"{GUARDIAN_ASSESSMENT_PREFIX}{payload}"
+    return f"""Guardian assessment:
+Tool: {hook_input.tool_name}
+Tool input:
+{tool_input}
+
+Outcome: {assessment.outcome}
+Risk: {assessment.risk_level}
+Authorization assessed at the time: {assessment.user_authorization}
+Decision rationale: {assessment.decision_rationale}
+Classification rationale: {assessment.classification_rationale}"""
 
 
 def permission_request_output(
@@ -363,7 +330,7 @@ def is_daemon_unavailable(exc: OSError) -> bool:
 
 
 def default_config() -> dict[str, Any]:
-    return deepcopy(DEFAULT_CONFIG)
+    return dict(DEFAULT_CONFIG)
 
 
 def merge_config(base: dict[str, Any], override: dict[str, Any]) -> None:

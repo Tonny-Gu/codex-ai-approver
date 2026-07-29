@@ -39,7 +39,7 @@ class _PendingAssessment:
     snapshot: TranscriptSnapshot
     event: Event = field(default_factory=Event)
     assessment: GuardianAssessment | None = None
-    error: BaseException | None = None
+    error: Exception | None = None
 
 
 class GuardianDaemon:
@@ -120,7 +120,7 @@ class GuardianDaemon:
             assessments = self._assess_batch(batch)
             for pending in batch:
                 pending.assessment = assessments[pending.hook_input.request_id]
-        except BaseException as exc:
+        except Exception as exc:
             for pending in batch:
                 pending.error = exc
         finally:
