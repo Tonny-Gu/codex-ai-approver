@@ -640,6 +640,23 @@ class GuardianDaemonTests(unittest.TestCase):
                 for record in usage_logs
             )
         )
+        self.assertTrue(
+            all(record["assessment_status"] == "success" for record in usage_logs)
+        )
+        self.assertTrue(
+            all(record["guardian_model"] == "gpt-5.5" for record in usage_logs)
+        )
+        self.assertTrue(
+            all(record["reasoning_effort"] == "medium" for record in usage_logs)
+        )
+        first_request = usage_logs[0]["requests"][0]
+        self.assertEqual(first_request["request_id"], "r1")
+        self.assertEqual(first_request["source_turn_id"], "turn-1")
+        self.assertEqual(first_request["tool"], "Bash")
+        self.assertEqual(first_request["command"], "git status")
+        self.assertEqual(first_request["tool_input"], {"command": "git status"})
+        self.assertEqual(first_request["assessment"], assessment().__dict__)
+        self.assertGreaterEqual(usage_logs[0]["duration_ms"], 0)
 
     def test_logs_turn_when_sdk_usage_is_unavailable(self) -> None:
         snapshot = transcript.TranscriptSnapshot(
@@ -655,12 +672,103 @@ class GuardianDaemonTests(unittest.TestCase):
                 SimpleNamespace(id="guardian-turn-1"),
                 SimpleNamespace(id="guardian-thread-1"),
                 [pending],
+                assessments={"request-1": assessment()},
             )
 
         payload = json.loads(captured.records[0].getMessage())
         self.assertEqual(payload["event"], "guardian_turn_token_usage")
         self.assertEqual(payload["guardian_turn_id"], "guardian-turn-1")
         self.assertIsNone(payload["token_usage"])
+        self.assertEqual(payload["assessment_status"], "success")
+
+    def test_logs_each_batched_request_with_its_own_assessment(self) -> None:
+        snapshot = transcript.TranscriptSnapshot(
+            window_key="initial",
+            compacted=False,
+            entries=(),
+            source_size=0,
+        )
+        bash = server._PendingAssessment(
+            permission_input(
+                "bash-request",
+                tool_input={"command": "git status", "timeout": 10},
+            ),
+            snapshot,
+        )
+        patch = server._PendingAssessment(
+            permission_input(
+                "patch-request",
+                tool_name="apply_patch",
+                tool_input={"patch": "*** Begin Patch"},
+            ),
+            snapshot,
+        )
+
+        with self.assertLogs(server.LOGGER, level="INFO") as captured:
+            server.log_turn_token_usage(
+                SimpleNamespace(id="guardian-turn-1"),
+                SimpleNamespace(id="guardian-thread-1"),
+                [bash, patch],
+                assessments={
+                    "bash-request": assessment(),
+                    "patch-request": assessment("deny"),
+                },
+            )
+
+        payload = json.loads(captured.records[0].getMessage())
+        self.assertEqual(payload["batch_size"], 2)
+        self.assertEqual(
+            payload["source_turn_ids"],
+            ["turn-1"],
+        )
+        self.assertEqual(
+            [
+                (item["request_id"], item["tool"], item["command"])
+                for item in payload["requests"]
+            ],
+            [
+                ("bash-request", "Bash", "git status"),
+                ("patch-request", "apply_patch", None),
+            ],
+        )
+        self.assertEqual(
+            payload["requests"][0]["assessment"]["outcome"],
+            "allow",
+        )
+        self.assertEqual(
+            payload["requests"][1]["assessment"]["outcome"],
+            "deny",
+        )
+        self.assertIn(
+            "must not perform",
+            payload["requests"][1]["assessment"]["decision_rationale"],
+        )
+
+    def test_logs_assessment_parse_errors_with_request_context(self) -> None:
+        snapshot = transcript.TranscriptSnapshot(
+            window_key="initial",
+            compacted=False,
+            entries=(),
+            source_size=0,
+        )
+        pending = server._PendingAssessment(permission_input(), snapshot)
+
+        with self.assertLogs(server.LOGGER, level="INFO") as captured:
+            server.log_turn_token_usage(
+                SimpleNamespace(id="guardian-turn-1"),
+                SimpleNamespace(id="guardian-thread-1"),
+                [pending],
+                assessment_error=ValueError("invalid assessment"),
+            )
+
+        payload = json.loads(captured.records[0].getMessage())
+        self.assertEqual(payload["assessment_status"], "error")
+        self.assertEqual(payload["assessment_error"]["type"], "ValueError")
+        self.assertEqual(
+            payload["assessment_error"]["message"],
+            "invalid assessment",
+        )
+        self.assertIsNone(payload["requests"][0]["assessment"])
 
     def test_prompt_marks_compacted_authorization_cap(self) -> None:
         snapshot = transcript.TranscriptSnapshot(

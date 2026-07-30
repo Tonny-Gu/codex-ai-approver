@@ -152,6 +152,7 @@ class GuardianDaemon:
                     raise
 
             try:
+                started_at = time.monotonic()
                 result = state.thread.run(
                     build_guardian_prompt(
                         snapshot,
@@ -162,16 +163,41 @@ class GuardianDaemon:
                     output_schema=OUTPUT_SCHEMA,
                     sandbox=self._sandbox.read_only,
                 )
+                duration_ms = round(
+                    (time.monotonic() - started_at) * 1000,
+                    3,
+                )
                 state.has_temporary_request_turn = True
             except Exception:
                 self._discard_thread(guardian_key)
                 raise
 
-            log_turn_token_usage(result, state.thread, batch)
-            return parse_guardian_assessments(
-                result.final_response or "",
-                [pending.hook_input.request_id for pending in batch],
+            try:
+                assessments = parse_guardian_assessments(
+                    result.final_response or "",
+                    [pending.hook_input.request_id for pending in batch],
+                )
+            except Exception as exc:
+                log_turn_token_usage(
+                    result,
+                    state.thread,
+                    batch,
+                    assessments=None,
+                    config=self.config,
+                    duration_ms=duration_ms,
+                    assessment_error=exc,
+                )
+                raise
+
+            log_turn_token_usage(
+                result,
+                state.thread,
+                batch,
+                assessments=assessments,
+                config=self.config,
+                duration_ms=duration_ms,
             )
+            return assessments
 
     def _thread_state(self, key: tuple[str, str]) -> _GuardianThreadState:
         with self._threads_lock:
@@ -212,6 +238,11 @@ def log_turn_token_usage(
     result: Any,
     thread: Any,
     batch: list[_PendingAssessment],
+    assessments: dict[str, GuardianAssessment] | None = None,
+    *,
+    config: GuardianConfig | None = None,
+    duration_ms: float | None = None,
+    assessment_error: Exception | None = None,
 ) -> None:
     usage = getattr(result, "usage", None)
     last_usage = getattr(usage, "last", None)
@@ -235,6 +266,44 @@ def log_turn_token_usage(
         else None
     )
     first_input = batch[0].hook_input
+    requests = []
+    for pending in batch:
+        hook_input = pending.hook_input
+        assessment = (
+            assessments.get(hook_input.request_id)
+            if assessments is not None
+            else None
+        )
+        requests.append(
+            {
+                "request_id": hook_input.request_id,
+                "source_turn_id": hook_input.turn_id,
+                "cwd": hook_input.cwd,
+                "tool": hook_input.tool_name,
+                "command": _tool_command(hook_input.tool_input),
+                "tool_input": hook_input.tool_input,
+                "assessment": (
+                    {
+                        "outcome": assessment.outcome,
+                        "risk_level": assessment.risk_level,
+                        "user_authorization": assessment.user_authorization,
+                        "decision_rationale": assessment.decision_rationale,
+                        "classification_rationale": (
+                            assessment.classification_rationale
+                        ),
+                    }
+                    if assessment is not None
+                    else None
+                ),
+            }
+        )
+
+    assessment_status = "success"
+    if assessment_error is not None:
+        assessment_status = "error"
+    elif assessments is None:
+        assessment_status = "unavailable"
+
     payload = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": "guardian_turn_token_usage",
@@ -245,10 +314,35 @@ def log_turn_token_usage(
         ),
         "guardian_thread_id": getattr(thread, "id", None),
         "guardian_turn_id": getattr(result, "id", None),
+        "guardian_model": config.model if config is not None else None,
+        "reasoning_effort": (
+            config.reasoning_effort if config is not None else None
+        ),
+        "config_fingerprint": (
+            config_fingerprint(config) if config is not None else None
+        ),
         "batch_size": len(batch),
+        "duration_ms": duration_ms,
+        "assessment_status": assessment_status,
+        "assessment_error": (
+            {
+                "type": type(assessment_error).__name__,
+                "message": str(assessment_error),
+            }
+            if assessment_error is not None
+            else None
+        ),
+        "requests": requests,
         "token_usage": token_usage,
     }
     LOGGER.info(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
+def _tool_command(tool_input: dict[str, Any]) -> Any:
+    for field in ("command", "cmd"):
+        if field in tool_input:
+            return tool_input[field]
+    return None
 
 
 def configure_logging() -> None:

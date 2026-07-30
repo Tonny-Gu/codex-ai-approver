@@ -205,10 +205,18 @@ are combined into one guardian request and receive independent assessments.
 
 After every guardian turn, the daemon appends a structured
 `guardian_turn_token_usage` JSON record to `~/codex-ai-approver.log`. The record
-includes the source turn IDs, batch size, guardian thread and turn IDs, and the
-SDK-reported input, cached input, output, reasoning output, and total token
-usage for the response. `token_usage` is `null` if the installed SDK does not
-report usage for that turn.
+includes the source turn IDs, batch size, guardian thread and turn IDs, model,
+reasoning effort, request duration, and the SDK-reported input, cached input,
+output, reasoning output, and total token usage for the response. Each item in
+`requests` records the request ID, source turn, working directory, tool, an
+extracted `command`/`cmd` value when present, the exact tool input, and the
+guardian outcome, risk, authorization, decision rationale, and classification
+rationale. A response-schema failure is logged with `assessment_status =
+"error"` and an `assessment_error` before the hook fails closed. `token_usage`
+is `null` if the installed SDK does not report usage for that turn.
+
+The log file is set to mode `0600` because exact tool inputs and commands may
+contain sensitive values.
 
 Stop the daemon manually with:
 

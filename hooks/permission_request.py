@@ -93,7 +93,10 @@ def daemon_proxy(config: GuardianConfig) -> xmlrpc.client.ServerProxy:
 
 def _spawn_daemon() -> None:
     command = [sys.executable, str(Path(__file__).resolve()), "--daemon"]
-    with DAEMON_LOG_PATH.expanduser().open("a", encoding="utf-8") as log:
+    log_path = DAEMON_LOG_PATH.expanduser()
+    log_path.touch(mode=0o600, exist_ok=True)
+    log_path.chmod(0o600)
+    with log_path.open("a", encoding="utf-8") as log:
         subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
