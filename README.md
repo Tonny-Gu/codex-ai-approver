@@ -203,6 +203,13 @@ The daemon waits `batch_wait_seconds` before starting an assessment. Permission
 requests arriving concurrently for the same session, agent, and context window
 are combined into one guardian request and receive independent assessments.
 
+After every guardian turn, the daemon appends a structured
+`guardian_turn_token_usage` JSON record to `~/codex-ai-approver.log`. The record
+includes the source turn IDs, batch size, guardian thread and turn IDs, and the
+SDK-reported input, cached input, output, reasoning output, and total token
+usage for the response. `token_usage` is `null` if the installed SDK does not
+report usage for that turn.
+
 Stop the daemon manually with:
 
 ```bash

@@ -559,6 +559,7 @@ class GuardianDaemonTests(unittest.TestCase):
                 self.prompts.append(prompt)
                 ids = re.findall(r'"request_id": "([^"]+)"', prompt)
                 return SimpleNamespace(
+                    id=f"guardian-turn-{len(self.prompts)}",
                     final_response=json.dumps(
                         {
                             "assessments": [
@@ -569,7 +570,16 @@ class GuardianDaemonTests(unittest.TestCase):
                                 for request_id in ids
                             ]
                         }
-                    )
+                    ),
+                    usage=SimpleNamespace(
+                        last=SimpleNamespace(
+                            total_tokens=125,
+                            input_tokens=100,
+                            cached_input_tokens=80,
+                            output_tokens=25,
+                            reasoning_output_tokens=10,
+                        )
+                    ),
                 )
 
         class FakeCodex:
@@ -597,8 +607,9 @@ class GuardianDaemonTests(unittest.TestCase):
 
         first = server._PendingAssessment(permission_input("r1"), snapshot)
         second = server._PendingAssessment(permission_input("r2"), snapshot)
-        guardian._assess_batch([first])
-        guardian._assess_batch([second])
+        with self.assertLogs(server.LOGGER, level="INFO") as captured:
+            guardian._assess_batch([first])
+            guardian._assess_batch([second])
 
         self.assertEqual(fake_codex.starts, 1)
         self.assertEqual(len(fake_codex.thread._client.calls), 1)
@@ -606,6 +617,50 @@ class GuardianDaemonTests(unittest.TestCase):
         self.assertEqual(method, "thread/rollback")
         self.assertEqual(payload["numTurns"], 1)
         self.assertEqual(len(fake_codex.thread.prompts), 2)
+        usage_logs = [json.loads(record.getMessage()) for record in captured.records]
+        self.assertEqual(
+            [record["guardian_turn_id"] for record in usage_logs],
+            ["guardian-turn-1", "guardian-turn-2"],
+        )
+        self.assertTrue(
+            all(
+                record["event"] == "guardian_turn_token_usage"
+                for record in usage_logs
+            )
+        )
+        self.assertTrue(
+            all(
+                record["token_usage"]["total_tokens"] == 125
+                for record in usage_logs
+            )
+        )
+        self.assertTrue(
+            all(
+                record["token_usage"]["cached_input_tokens"] == 80
+                for record in usage_logs
+            )
+        )
+
+    def test_logs_turn_when_sdk_usage_is_unavailable(self) -> None:
+        snapshot = transcript.TranscriptSnapshot(
+            window_key="initial",
+            compacted=False,
+            entries=(),
+            source_size=0,
+        )
+        pending = server._PendingAssessment(permission_input(), snapshot)
+
+        with self.assertLogs(server.LOGGER, level="INFO") as captured:
+            server.log_turn_token_usage(
+                SimpleNamespace(id="guardian-turn-1"),
+                SimpleNamespace(id="guardian-thread-1"),
+                [pending],
+            )
+
+        payload = json.loads(captured.records[0].getMessage())
+        self.assertEqual(payload["event"], "guardian_turn_token_usage")
+        self.assertEqual(payload["guardian_turn_id"], "guardian-turn-1")
+        self.assertIsNone(payload["token_usage"])
 
     def test_prompt_marks_compacted_authorization_cap(self) -> None:
         snapshot = transcript.TranscriptSnapshot(

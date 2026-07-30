@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from socketserver import ThreadingMixIn
 from threading import Event, Lock
 from typing import Any
 from xmlrpc.server import SimpleXMLRPCServer
 import json
+import logging
 import sys
 import time
 
@@ -20,6 +22,9 @@ from guardian_common import (
     parse_guardian_assessments,
 )
 from guardian_transcript import TranscriptSnapshot, derive_transcript_snapshot
+
+
+LOGGER = logging.getLogger("codex_ai_approver.guardian")
 
 
 class ThreadingXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
@@ -162,6 +167,7 @@ class GuardianDaemon:
                 self._discard_thread(guardian_key)
                 raise
 
+            log_turn_token_usage(result, state.thread, batch)
             return parse_guardian_assessments(
                 result.final_response or "",
                 [pending.hook_input.request_id for pending in batch],
@@ -200,6 +206,59 @@ class GuardianDaemon:
     def _discard_thread(self, key: tuple[str, str]) -> None:
         with self._threads_lock:
             self._threads.pop(key, None)
+
+
+def log_turn_token_usage(
+    result: Any,
+    thread: Any,
+    batch: list[_PendingAssessment],
+) -> None:
+    usage = getattr(result, "usage", None)
+    last_usage = getattr(usage, "last", None)
+    token_usage = (
+        {
+            "total_tokens": getattr(last_usage, "total_tokens", None),
+            "input_tokens": getattr(last_usage, "input_tokens", None),
+            "cached_input_tokens": getattr(
+                last_usage,
+                "cached_input_tokens",
+                None,
+            ),
+            "output_tokens": getattr(last_usage, "output_tokens", None),
+            "reasoning_output_tokens": getattr(
+                last_usage,
+                "reasoning_output_tokens",
+                None,
+            ),
+        }
+        if last_usage is not None
+        else None
+    )
+    first_input = batch[0].hook_input
+    payload = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": "guardian_turn_token_usage",
+        "session_id": first_input.session_id,
+        "agent_id": first_input.agent_id or "root",
+        "source_turn_ids": sorted(
+            {pending.hook_input.turn_id for pending in batch}
+        ),
+        "guardian_thread_id": getattr(thread, "id", None),
+        "guardian_turn_id": getattr(result, "id", None),
+        "batch_size": len(batch),
+        "token_usage": token_usage,
+    }
+    LOGGER.info(json.dumps(payload, sort_keys=True, ensure_ascii=False))
+
+
+def configure_logging() -> None:
+    if LOGGER.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.propagate = False
 
 
 def build_guardian_prompt(
@@ -242,6 +301,7 @@ Return exactly one assessment for every request_id.
 
 
 def run_daemon() -> int:
+    configure_logging()
     config = load_config()
     guardian = GuardianDaemon(config)
     server: ThreadingXMLRPCServer | None = None
