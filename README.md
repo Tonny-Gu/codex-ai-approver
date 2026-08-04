@@ -55,7 +55,7 @@ The deterministic transcript retains:
   context window.
 - Text messages emitted by lifecycle hooks. This hook's own message is
   self-contained and includes the exact action and complete assessment.
-- The compacted summary at the start of a new context window.
+- User messages retained by Codex at the start of a compacted context window.
 
 It excludes assistant prose, reasoning, and standalone historical tool records.
 Retained text is passed to the guardian unchanged.
@@ -67,9 +67,10 @@ stated number of user turns. The granting turn counts as the first turn unless
 the user explicitly specifies a different start.
 
 After context compaction, pre-compaction user messages and hook messages are no
-longer direct evidence. All prior positive grants end. The compacted summary
-may independently support the current task in substance at no more than
-`medium`, but it cannot preserve an expired, revoked, or turn-bounded grant.
+longer direct evidence. All prior positive grants end. User messages retained
+in the compacted context may independently support the current task in
+substance at no more than `medium`, but they cannot preserve an expired,
+revoked, or turn-bounded grant.
 `high` authorization requires a direct user message in the current context
 window.
 

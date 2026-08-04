@@ -277,7 +277,7 @@ class TranscriptTests(unittest.TestCase):
         self.assertIn("Outcome: allow", hook_messages[0]["text"])
         self.assertEqual(hook_messages[1]["text"], "Other hook context.")
 
-    def test_compaction_keeps_only_summary_then_new_evidence(self) -> None:
+    def test_compaction_uses_retained_user_messages_then_new_evidence(self) -> None:
         path = self.write_rollout(
             [
                 self.response_item(
@@ -290,7 +290,7 @@ class TranscriptTests(unittest.TestCase):
                 {
                     "type": "compacted",
                     "payload": {
-                        "message": "The user asked to continue deployment work.",
+                        "message": "",
                         "window_number": 3,
                         "replacement_history": [
                             {
@@ -302,7 +302,21 @@ class TranscriptTests(unittest.TestCase):
                                         "text": "Old exact authorization.",
                                     }
                                 ],
-                            }
+                            },
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": "Ignored assistant context.",
+                                    }
+                                ],
+                            },
+                            {
+                                "type": "compaction",
+                                "encrypted_content": "ignored encrypted summary",
+                            },
                         ],
                     },
                 },
@@ -320,9 +334,11 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(snapshot.window_key, "window-3")
         self.assertEqual(snapshot.current_user_turn, 1)
         rendered = snapshot.render()
-        self.assertNotIn("Old exact authorization.", rendered)
-        self.assertIn("The user asked to continue deployment work.", rendered)
+        self.assertIn("Old exact authorization.", rendered)
         self.assertIn("New direct authorization.", rendered)
+        self.assertNotIn("Ignored assistant context.", rendered)
+        self.assertNotIn("ignored encrypted summary", rendered)
+        self.assertIn('"kind": "compacted_user_messages"', rendered)
         self.assertIn('"authorization_cap": "medium"', rendered)
         self.assertIn('"authorization_grants_reset": true', rendered)
         self.assertIn('"user_turn": 0', rendered)
@@ -776,9 +792,9 @@ class GuardianDaemonTests(unittest.TestCase):
             compacted=True,
             entries=(
                 {
-                    "kind": "compacted_summary",
+                    "kind": "compacted_user_messages",
                     "authorization_cap": "medium",
-                    "text": "Continue the task.",
+                    "messages": ["Continue the task."],
                 },
             ),
             source_size=1,

@@ -41,15 +41,26 @@ class _TranscriptBuilder:
         else:
             self.window_key = f"legacy-window-{ordinal}"
         self.compacted = True
-        self.prefix_entries = [
-            {
-                "kind": "compacted_summary",
-                "authorization_cap": "medium",
-                "authorization_grants_reset": True,
-                "user_turn": 0,
-                "text": payload.get("message", ""),
-            }
+        replacement_history = payload.get("replacement_history")
+        if not isinstance(replacement_history, list):
+            replacement_history = []
+        retained_user_messages = [
+            text
+            for item in replacement_history
+            if isinstance(item, dict)
+            if (text := _user_message_text(item)) is not None
         ]
+        self.prefix_entries = []
+        if retained_user_messages:
+            self.prefix_entries.append(
+                {
+                    "kind": "compacted_user_messages",
+                    "authorization_cap": "medium",
+                    "authorization_grants_reset": True,
+                    "user_turn": 0,
+                    "messages": retained_user_messages,
+                }
+            )
         self.orphan_entries = []
         self.turns = []
 
@@ -166,19 +177,23 @@ def _consume_response_item(
     builder: _TranscriptBuilder,
     payload: dict[str, Any],
 ) -> None:
-    item_type = payload.get("type")
-    if item_type == "message" and payload.get("role") == "user":
-        content = payload.get("content")
-        if not isinstance(content, list):
-            return
-        text = "\n".join(
-            item["text"]
-            for item in content
-            if isinstance(item, dict)
-            and isinstance(item.get("text"), str)
-        )
-        if text.strip():
-            builder.add_user_message(text)
+    text = _user_message_text(payload)
+    if text is not None:
+        builder.add_user_message(text)
+
+
+def _user_message_text(payload: dict[str, Any]) -> str | None:
+    if payload.get("type") != "message" or payload.get("role") != "user":
+        return None
+    content = payload.get("content")
+    if not isinstance(content, list):
+        return None
+    text = "\n".join(
+        item["text"]
+        for item in content
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    )
+    return text if text.strip() else None
 
 
 def _consume_hook_completed(

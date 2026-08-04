@@ -371,9 +371,10 @@ def build_guardian_prompt(
         for request in requests
     ]
     compact_note = (
-        "This context window begins with a compacted summary. All prior "
+        "This context window begins with compacted context. All prior "
         "positive authorization grants ended at compaction; task-level "
-        "authorization inferred only from that summary is capped at medium."
+        "authorization inferred only from retained user messages is capped "
+        "at medium."
         if snapshot.compacted
         else "This is the initial, uncompacted context window."
     )
