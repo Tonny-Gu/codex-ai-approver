@@ -16,6 +16,7 @@ if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
 from guardian_common import (  # noqa: E402
+    DAEMON_API_VERSION,
     GuardianAssessment,
     GuardianConfig,
     PermissionRequestInput,
@@ -53,6 +54,8 @@ def ensure_daemon_running(config: GuardianConfig) -> None:
         status = daemon_proxy(config).status()
         if (
             status.get("ok") is True
+            and status.get("running") is True
+            and status.get("api_version") == DAEMON_API_VERSION
             and status.get("config_fingerprint") == expected_fingerprint
         ):
             return
@@ -70,6 +73,8 @@ def ensure_daemon_running(config: GuardianConfig) -> None:
             response = daemon_proxy(config).status()
             if (
                 response.get("ok") is True
+                and response.get("running") is True
+                and response.get("api_version") == DAEMON_API_VERSION
                 and response.get("config_fingerprint") == expected_fingerprint
             ):
                 return
@@ -129,6 +134,18 @@ def daemon_stop_cli() -> int:
     return 0
 
 
+def daemon_status_cli() -> int:
+    config = load_config()
+    try:
+        response = daemon_proxy(config).status()
+    except OSError as exc:
+        if not is_daemon_unavailable(exc):
+            raise
+        response = {"ok": True, "running": False, "api_version": None}
+    print_json(response)
+    return 0
+
+
 def run_hook() -> int:
     try:
         config = load_config()
@@ -165,6 +182,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_daemon()
     if command == "--daemon-stop":
         return daemon_stop_cli()
+    if command == "--daemon-status":
+        return daemon_status_cli()
 
     print(f"unknown option: {command}", file=sys.stderr)
     return 2

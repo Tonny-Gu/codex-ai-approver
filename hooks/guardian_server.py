@@ -12,6 +12,7 @@ import sys
 import time
 
 from guardian_common import (
+    DAEMON_API_VERSION,
     OUTPUT_SCHEMA,
     GuardianAssessment,
     GuardianConfig,
@@ -111,6 +112,8 @@ class GuardianDaemon:
     def status(self) -> dict[str, Any]:
         return {
             "ok": True,
+            "running": True,
+            "api_version": DAEMON_API_VERSION,
             "config_fingerprint": config_fingerprint(self.config),
         }
 

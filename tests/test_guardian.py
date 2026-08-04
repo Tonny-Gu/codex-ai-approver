@@ -127,6 +127,14 @@ class ConfigTests(unittest.TestCase):
         self.assertNotIn("{{ outcome_policy }}", policy)
 
 
+class HookConfigTests(unittest.TestCase):
+    def test_only_registers_permission_request_hook(self) -> None:
+        payload = json.loads((HOOKS_DIR / "hooks.json").read_text(encoding="utf-8"))
+        hooks = payload["hooks"]
+
+        self.assertEqual(set(hooks), {"PermissionRequest"})
+
+
 class PermissionInputTests(unittest.TestCase):
     def test_parses_full_hook_payload_without_agent_controls(self) -> None:
         command = (
@@ -523,6 +531,13 @@ class GuardianDaemonTests(unittest.TestCase):
             batch_wait_seconds=batch_wait_seconds,
         )
 
+    def test_status_reports_daemon_api_version(self) -> None:
+        guardian = server.GuardianDaemon(self.config())
+
+        status = guardian.status()
+        self.assertTrue(status["running"])
+        self.assertEqual(status["api_version"], common.DAEMON_API_VERSION)
+
     def test_concurrent_requests_are_batched(self) -> None:
         guardian = server.GuardianDaemon(self.config(0.05))
         calls: list[list[server._PendingAssessment]] = []
@@ -830,6 +845,99 @@ class HookTests(unittest.TestCase):
             result = hook.assess_with_daemon(permission_input(), self.config())
         self.assertEqual(result, assessment())
         self.assertEqual(proxy.payload["tool_input"], {"command": "git status"})
+
+    def test_current_daemon_api_version_does_not_restart(self) -> None:
+        proxy = mock.Mock()
+        proxy.status.return_value = {
+            "ok": True,
+            "running": True,
+            "api_version": common.DAEMON_API_VERSION,
+            "config_fingerprint": common.config_fingerprint(self.config()),
+        }
+        with mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ), mock.patch.object(hook, "_spawn_daemon") as spawn:
+            hook.ensure_daemon_running(self.config())
+
+        proxy.stop.assert_not_called()
+        spawn.assert_not_called()
+
+    def test_mismatched_daemon_api_version_is_replaced(self) -> None:
+        proxy = mock.Mock()
+        current_status = {
+            "ok": True,
+            "running": True,
+            "api_version": common.DAEMON_API_VERSION,
+            "config_fingerprint": common.config_fingerprint(self.config()),
+        }
+        proxy.status.side_effect = [
+            {**current_status, "api_version": common.DAEMON_API_VERSION + 1},
+            current_status,
+        ]
+        with mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ), mock.patch.object(
+            hook,
+            "_wait_for_daemon_stop",
+        ) as wait_for_stop, mock.patch.object(
+            hook,
+            "_spawn_daemon",
+        ) as spawn:
+            hook.ensure_daemon_running(self.config())
+
+        proxy.stop.assert_called_once_with()
+        wait_for_stop.assert_called_once_with(self.config())
+        spawn.assert_called_once_with()
+
+    def test_daemon_status_cli_reports_running_api_version(self) -> None:
+        proxy = mock.Mock()
+        proxy.status.return_value = {
+            "ok": True,
+            "running": True,
+            "api_version": common.DAEMON_API_VERSION,
+            "config_fingerprint": "fingerprint",
+        }
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch.object(
+            hook,
+            "load_config",
+            return_value=self.config(),
+        ), mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ):
+            code = hook.daemon_status_cli()
+
+        self.assertEqual(code, 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["running"])
+        self.assertEqual(payload["api_version"], common.DAEMON_API_VERSION)
+
+    def test_daemon_status_cli_reports_not_running(self) -> None:
+        proxy = mock.Mock()
+        proxy.status.side_effect = ConnectionRefusedError()
+        stdout = io.StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch.object(
+            hook,
+            "load_config",
+            return_value=self.config(),
+        ), mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ):
+            code = hook.daemon_status_cli()
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {"ok": True, "running": False, "api_version": None},
+        )
 
     def test_allow_and_deny_emit_self_contained_messages(self) -> None:
         allowed = common.permission_request_output(permission_input(), assessment())

@@ -11,6 +11,7 @@ import uuid
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 POLICY_TEMPLATE_PATH = Path(__file__).with_name("guardian_policy.md")
+DAEMON_API_VERSION = 1
 
 RISK_LEVELS = ("low", "medium", "high", "critical")
 USER_AUTHORIZATION_LEVELS = ("prohibited", "none", "low", "medium", "high")

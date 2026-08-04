@@ -219,6 +219,32 @@ is `null` if the installed SDK does not report usage for that turn.
 The log file is set to mode `0600` because exact tool inputs and commands may
 contain sensitive values.
 
+## Daemon Lifecycle and Status
+
+The first permission request starts the daemon. It remains running so later
+requests and Codex processes can reuse it. Before every assessment, the hook
+checks both the daemon API version and the effective configuration fingerprint.
+If either differs, the hook stops the old daemon and starts the current version.
+
+`DAEMON_API_VERSION` in `hooks/guardian_common.py` identifies the XML-RPC
+contract and must be incremented whenever that contract changes incompatibly.
+
+Query whether the daemon is running and which API version it exposes with:
+
+```bash
+python3 hooks/permission_request.py --daemon-status
+```
+
+When it is not running, the command prints:
+
+```json
+{"ok":true,"running":false,"api_version":null}
+```
+
+When it is running, the response also includes the effective configuration
+fingerprint, and the daemon continues running until it is replaced or stopped
+manually.
+
 Stop the daemon manually with:
 
 ```bash
