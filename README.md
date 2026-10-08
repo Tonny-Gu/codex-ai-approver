@@ -10,11 +10,16 @@ trust, or user permissions.
 
 ## Install
 
-Install the Python dependency in the environment that Codex uses for hooks:
+Install the Python dependency in the environment that Codex uses for hooks.
+The hook runs the first `python3` on Codex's `PATH`; check which interpreter
+that is with `which python3` and install into it:
 
 ```bash
 python3 -m pip install 'openai-codex>=0.161.0'
 ```
+
+If the SDK is missing, every permission request is denied and the denial
+message reports `openai-codex is not installed in this Python environment`.
 
 Add this repository as a Codex plugin marketplace and install the plugin:
 
@@ -26,6 +31,27 @@ codex plugin add codex-ai-approver@codex-ai-approver
 
 Start a new Codex thread or restart Codex. Because this plugin registers a
 command hook, open `/hooks` and trust it if Codex asks for review.
+
+## Update
+
+Refresh the marketplace to install the latest commit on its configured ref:
+
+```bash
+codex plugin marketplace upgrade codex-ai-approver
+```
+
+This also refreshes the installed plugin cache, so no reinstall is needed.
+Updates are tracked by Git revision, not by the plugin version in
+`.codex-plugin/plugin.json`. Then start a new Codex thread or restart Codex,
+and trust the hook again in `/hooks` if Codex asks for review.
+
+A running guardian daemon is replaced automatically on the next permission
+request when its daemon API version or configuration differs. After an update
+that keeps both unchanged, stop it so the next request starts the new code:
+
+```bash
+python3 ~/.codex/plugins/cache/codex-ai-approver/codex-ai-approver/0.1.0/hooks/permission_request.py --daemon-stop
+```
 
 ## What the Hook Covers
 
