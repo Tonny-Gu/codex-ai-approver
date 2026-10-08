@@ -36,7 +36,7 @@ class ThreadingXMLRPCServer(ThreadingMixIn, SimpleXMLRPCServer):
 class _GuardianThreadState:
     thread: Any
     lock: Lock = field(default_factory=Lock)
-    has_temporary_request_turn: bool = False
+    temporary_turn_id: str | None = None
 
 
 @dataclass
@@ -55,7 +55,7 @@ class GuardianDaemon:
         self._effort: Any = None
         self._approval_mode: Any = None
         self._sandbox: Any = None
-        self._rollback_response: Any = None
+        self._revert_response: Any = None
         self._threads: dict[tuple[str, str], _GuardianThreadState] = {}
         self._threads_lock = Lock()
         self._batches: dict[
@@ -67,7 +67,7 @@ class GuardianDaemon:
     def start(self) -> None:
         try:
             from openai_codex import ApprovalMode, Codex, Sandbox
-            from openai_codex.generated.v2_all import ThreadRollbackResponse
+            from openai_codex.generated.v2_all import ThreadRevertResponse
             from openai_codex.types import ReasoningEffort
         except ModuleNotFoundError as exc:
             raise RuntimeError(
@@ -76,7 +76,7 @@ class GuardianDaemon:
 
         self._approval_mode = ApprovalMode
         self._sandbox = Sandbox
-        self._rollback_response = ThreadRollbackResponse
+        self._revert_response = ThreadRevertResponse
         self._effort = ReasoningEffort(self.config.reasoning_effort)
         self._codex = Codex()
 
@@ -147,9 +147,9 @@ class GuardianDaemon:
         guardian_key = first.hook_input.guardian_key
 
         with state.lock:
-            if state.has_temporary_request_turn:
+            if state.temporary_turn_id is not None:
                 try:
-                    self._rollback_temporary_request(state)
+                    self._revert_temporary_request(state)
                 except Exception:
                     self._discard_thread(guardian_key)
                     raise
@@ -170,7 +170,7 @@ class GuardianDaemon:
                     (time.monotonic() - started_at) * 1000,
                     3,
                 )
-                state.has_temporary_request_turn = True
+                state.temporary_turn_id = result.id
             except Exception:
                 self._discard_thread(guardian_key)
                 raise
@@ -220,17 +220,19 @@ class GuardianDaemon:
             self._threads[key] = state
             return state
 
-    def _rollback_temporary_request(self, state: _GuardianThreadState) -> None:
+    def _revert_temporary_request(self, state: _GuardianThreadState) -> None:
+        # The SDK exposes no Thread method for the app-server thread/revert RPC.
         try:
             state.thread._client.request(
-                "thread/rollback",
-                {"threadId": state.thread.id, "numTurns": 1},
-                response_model=self._rollback_response,
+                "thread/revert",
+                {
+                    "threadId": state.thread.id,
+                    "beforeTurnId": state.temporary_turn_id,
+                },
+                response_model=self._revert_response,
             )
-        except Exception:
-            state.has_temporary_request_turn = False
-            raise
-        state.has_temporary_request_turn = False
+        finally:
+            state.temporary_turn_id = None
 
     def _discard_thread(self, key: tuple[str, str]) -> None:
         with self._threads_lock:

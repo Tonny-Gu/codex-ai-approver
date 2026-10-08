@@ -571,7 +571,7 @@ class GuardianDaemonTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(calls[0]), 2)
 
-    def test_previous_temporary_request_is_rolled_back(self) -> None:
+    def test_previous_temporary_request_is_reverted(self) -> None:
         class FakeClient:
             def __init__(self):
                 self.calls = []
@@ -628,7 +628,7 @@ class GuardianDaemonTests(unittest.TestCase):
         guardian._effort = "medium"
         guardian._approval_mode = SimpleNamespace(deny_all="deny_all")
         guardian._sandbox = SimpleNamespace(read_only="read_only")
-        guardian._rollback_response = object
+        guardian._revert_response = object
         snapshot = transcript.TranscriptSnapshot(
             window_key="initial",
             compacted=False,
@@ -645,8 +645,11 @@ class GuardianDaemonTests(unittest.TestCase):
         self.assertEqual(fake_codex.starts, 1)
         self.assertEqual(len(fake_codex.thread._client.calls), 1)
         method, payload, _ = fake_codex.thread._client.calls[0]
-        self.assertEqual(method, "thread/rollback")
-        self.assertEqual(payload["numTurns"], 1)
+        self.assertEqual(method, "thread/revert")
+        self.assertEqual(
+            payload,
+            {"threadId": "guardian-thread", "beforeTurnId": "guardian-turn-1"},
+        )
         self.assertEqual(len(fake_codex.thread.prompts), 2)
         usage_logs = [json.loads(record.getMessage()) for record in captured.records]
         self.assertEqual(

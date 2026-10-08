@@ -13,7 +13,7 @@ trust, or user permissions.
 Install the Python dependency in the environment that Codex uses for hooks:
 
 ```bash
-python3 -m pip install openai-codex
+python3 -m pip install 'openai-codex>=0.161.0'
 ```
 
 Add this repository as a Codex plugin marketplace and install the plugin:
@@ -187,16 +187,17 @@ with a different config fingerprint.
 ## Context and Concurrent Requests
 
 The daemon keeps one guardian thread for each `(session_id, agent_id)` pair.
-Each assessment turn contains:
+The guardian policy is set once as the thread's developer instructions. Each
+assessment turn contains:
 
 ```text
-[guardian policy]
 [complete deterministic transcript for the current context window]
 [one or more planned actions]
 ```
 
-Before the next assessment, the daemon rolls back the previous temporary
-assessment turn. The next transcript therefore replaces rather than appends to
+Before the next assessment, the daemon reverts the guardian thread to the state
+before the previous temporary assessment turn with the app-server
+`thread/revert` method. The next transcript therefore replaces rather than appends to
 the guardian's semantic context, while its unchanged token prefix remains
 eligible for prompt-cache reuse.
 
@@ -206,8 +207,9 @@ are combined into one guardian request and receive independent assessments.
 
 After every guardian turn, the daemon appends a structured
 `guardian_turn_token_usage` JSON record to `~/codex-ai-approver.log`. The record
-includes the source turn IDs, batch size, guardian thread and turn IDs, model,
-reasoning effort, request duration, and the SDK-reported input, cached input,
+includes the session and agent IDs, source turn IDs, batch size, guardian
+thread and turn IDs, model, reasoning effort, config fingerprint, request
+duration, assessment status, and the SDK-reported input, cached input,
 output, reasoning output, and total token usage for the response. Each item in
 `requests` records the request ID, source turn, working directory, tool, an
 extracted `command`/`cmd` value when present, the exact tool input, and the
