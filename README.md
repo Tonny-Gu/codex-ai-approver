@@ -226,7 +226,20 @@ contain sensitive values.
 The first permission request starts the daemon. It remains running so later
 requests and Codex processes can reuse it. Before every assessment, the hook
 checks both the daemon API version and the effective configuration fingerprint.
-If either differs, the hook stops the old daemon and starts the current version.
+If either differs, or the daemon reports itself unhealthy, the hook stops the
+old daemon and starts the current version.
+
+The daemon does not restart its Codex app-server in place. When an assessment
+fails because the app-server process is gone, the daemon reports `ok: false`
+with a `codex_failure` description and answers that assessment with XML-RPC
+fault code `CODEX_UNAVAILABLE_FAULT`. The hook then replaces the daemon and
+retries the request once. Other assessment failures are not retried.
+
+If a newly started daemon exits before it becomes ready, the hook fails
+immediately instead of waiting for the startup timeout. On startup failure or
+timeout, the denial message includes the last lines the new daemon wrote to
+`~/codex-ai-approver.log`, so the agent sees the cause, such as a missing SDK
+or failed Codex authentication.
 
 `DAEMON_API_VERSION` in `hooks/guardian_common.py` identifies the XML-RPC
 contract and must be incremented whenever that contract changes incompatibly.
@@ -244,7 +257,7 @@ When it is not running, the command prints:
 ```
 
 When it is running, the response also includes the effective configuration
-fingerprint, and the daemon continues running until it is replaced or stopped
+fingerprint and `codex_failure`, and the daemon continues running until it is replaced or stopped
 manually.
 
 Stop the daemon manually with:

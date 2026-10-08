@@ -11,11 +11,13 @@ import xmlrpc.client
 DAEMON_HOST = "localhost"
 DAEMON_LOG_PATH = Path("~/codex-ai-approver.log")
 DAEMON_STARTUP_TIMEOUT_SECONDS = 30
+DAEMON_STARTUP_OUTPUT_LINES = 20
 HOOKS_DIR = Path(__file__).resolve().parent
 if str(HOOKS_DIR) not in sys.path:
     sys.path.insert(0, str(HOOKS_DIR))
 
 from guardian_common import (  # noqa: E402
+    CODEX_UNAVAILABLE_FAULT,
     DAEMON_API_VERSION,
     GuardianAssessment,
     GuardianConfig,
@@ -44,48 +46,84 @@ def assess_with_daemon(
             raise
         ensure_daemon_running(config)
         response = daemon_proxy(config).assess(hook_input.__dict__)
+    except xmlrpc.client.Fault as exc:
+        if exc.faultCode != CODEX_UNAVAILABLE_FAULT:
+            raise
+        ensure_daemon_running(config)
+        response = daemon_proxy(config).assess(hook_input.__dict__)
 
     return parse_guardian_assessment_mapping(response, hook_input.request_id)
 
 
 def ensure_daemon_running(config: GuardianConfig) -> None:
-    expected_fingerprint = config_fingerprint(config)
     try:
-        status = daemon_proxy(config).status()
-        if (
-            status.get("ok") is True
-            and status.get("running") is True
-            and status.get("api_version") == DAEMON_API_VERSION
-            and status.get("config_fingerprint") == expected_fingerprint
-        ):
+        if _is_ready(config):
             return
         daemon_proxy(config).stop()
         _wait_for_daemon_stop(config)
     except Exception:
         pass
 
-    _spawn_daemon()
+    log_offset = _daemon_log_size()
+    process = _spawn_daemon()
 
     deadline = time.monotonic() + DAEMON_STARTUP_TIMEOUT_SECONDS
     last_error: Exception | None = None
     while time.monotonic() < deadline:
+        exit_code = process.poll()
         try:
-            response = daemon_proxy(config).status()
-            if (
-                response.get("ok") is True
-                and response.get("running") is True
-                and response.get("api_version") == DAEMON_API_VERSION
-                and response.get("config_fingerprint") == expected_fingerprint
-            ):
+            if _is_ready(config):
                 return
         except Exception as exc:
             last_error = exc
+        if exit_code is not None:
+            # A concurrently spawned daemon may own the port; the readiness
+            # check above already accepted it if so.
+            raise RuntimeError(
+                f"guardian daemon exited with code {exit_code} during startup"
+                f"{_daemon_output_since(log_offset)}"
+            )
         time.sleep(0.2)
 
     detail = f": {last_error}" if last_error else ""
     raise RuntimeError(
         f"guardian daemon did not become ready within "
         f"{DAEMON_STARTUP_TIMEOUT_SECONDS:g}s{detail}"
+        f"{_daemon_output_since(log_offset)}"
+    )
+
+
+def _daemon_log_size() -> int:
+    try:
+        return DAEMON_LOG_PATH.expanduser().stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _daemon_output_since(offset: int) -> str:
+    """Return the spawned daemon's own startup output for the error message."""
+    # Reading only from the pre-spawn offset keeps assessment records written
+    # earlier by other daemons out of the hook's message.
+    log_path = DAEMON_LOG_PATH.expanduser()
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as log:
+            log.seek(offset)
+            lines = log.read().strip().splitlines()
+    except OSError:
+        return f"; see {DAEMON_LOG_PATH}"
+    if not lines:
+        return f"; see {DAEMON_LOG_PATH}"
+    tail = "\n".join(lines[-DAEMON_STARTUP_OUTPUT_LINES:])
+    return f". Daemon output (from {DAEMON_LOG_PATH}):\n{tail}"
+
+
+def _is_ready(config: GuardianConfig) -> bool:
+    status = daemon_proxy(config).status()
+    return (
+        status.get("ok") is True
+        and status.get("running") is True
+        and status.get("api_version") == DAEMON_API_VERSION
+        and status.get("config_fingerprint") == config_fingerprint(config)
     )
 
 
@@ -96,13 +134,13 @@ def daemon_proxy(config: GuardianConfig) -> xmlrpc.client.ServerProxy:
     )
 
 
-def _spawn_daemon() -> None:
+def _spawn_daemon() -> subprocess.Popen[bytes]:
     command = [sys.executable, str(Path(__file__).resolve()), "--daemon"]
     log_path = DAEMON_LOG_PATH.expanduser()
     log_path.touch(mode=0o600, exist_ok=True)
     log_path.chmod(0o600)
     with log_path.open("a", encoding="utf-8") as log:
-        subprocess.Popen(
+        return subprocess.Popen(
             command,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -158,8 +196,9 @@ def run_hook() -> int:
 
 
 def _handle_error(exc: Exception) -> int:
+    detail = exc.faultString if isinstance(exc, xmlrpc.client.Fault) else exc
     reason = (
-        f"Codex AI Approver guardian hook failed: {exc}. This is a hook "
+        f"Codex AI Approver guardian hook failed: {detail}. This is a hook "
         "setup/runtime failure, not a guardian safety assessment. Do not retry "
         "the same tool call unchanged; ask the user to fix the hook setup, "
         "dependency, Codex authentication, or config."

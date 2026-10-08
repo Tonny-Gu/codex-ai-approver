@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+import xmlrpc.client
 
 
 HOOKS_DIR = Path(__file__).resolve().parents[1] / "hooks"
@@ -538,6 +539,40 @@ class GuardianDaemonTests(unittest.TestCase):
         self.assertTrue(status["running"])
         self.assertEqual(status["api_version"], common.DAEMON_API_VERSION)
 
+    def test_codex_transport_failure_marks_daemon_unhealthy(self) -> None:
+        class TransportClosed(Exception):
+            pass
+
+        guardian = server.GuardianDaemon(self.config())
+        guardian._transport_errors = (TransportClosed,)
+
+        def fail(batch):
+            raise TransportClosed("Codex process closed stdout")
+
+        guardian._assess_batch = fail  # type: ignore[method-assign]
+        with self.assertRaises(TransportClosed):
+            guardian.assess(permission_input())
+
+        status = guardian.status()
+        self.assertFalse(status["ok"])
+        self.assertEqual(
+            status["codex_failure"],
+            "TransportClosed: Codex process closed stdout",
+        )
+
+    def test_assessment_failure_keeps_daemon_healthy(self) -> None:
+        guardian = server.GuardianDaemon(self.config())
+        guardian._transport_errors = (BrokenPipeError,)
+
+        def fail(batch):
+            raise ValueError("bad guardian response")
+
+        guardian._assess_batch = fail  # type: ignore[method-assign]
+        with self.assertRaises(ValueError):
+            guardian.assess(permission_input())
+
+        self.assertTrue(guardian.status()["ok"])
+
     def test_concurrent_requests_are_batched(self) -> None:
         guardian = server.GuardianDaemon(self.config(0.05))
         calls: list[list[server._PendingAssessment]] = []
@@ -848,6 +883,101 @@ class HookTests(unittest.TestCase):
             result = hook.assess_with_daemon(permission_input(), self.config())
         self.assertEqual(result, assessment())
         self.assertEqual(proxy.payload["tool_input"], {"command": "git status"})
+
+    def test_codex_unavailable_fault_replaces_daemon_and_retries(self) -> None:
+        proxy = mock.Mock()
+        proxy.assess.side_effect = [
+            xmlrpc.client.Fault(common.CODEX_UNAVAILABLE_FAULT, "gone"),
+            assessment().__dict__,
+        ]
+        with mock.patch.object(hook, "ensure_daemon_running") as ensure, mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ):
+            result = hook.assess_with_daemon(permission_input(), self.config())
+
+        self.assertEqual(result, assessment())
+        self.assertEqual(ensure.call_count, 2)
+        self.assertEqual(proxy.assess.call_count, 2)
+
+    def test_other_assessment_fault_is_not_retried(self) -> None:
+        proxy = mock.Mock()
+        proxy.assess.side_effect = xmlrpc.client.Fault(1, "bad response")
+        with mock.patch.object(hook, "ensure_daemon_running"), mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ):
+            with self.assertRaises(xmlrpc.client.Fault):
+                hook.assess_with_daemon(permission_input(), self.config())
+
+        self.assertEqual(proxy.assess.call_count, 1)
+
+    def test_daemon_startup_exit_reports_its_output_without_waiting(self) -> None:
+        proxy = mock.Mock()
+        proxy.status.side_effect = ConnectionRefusedError()
+        process = mock.Mock()
+        process.poll.return_value = 1
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "daemon.log"
+            log_path.write_text("earlier assessment record\n", encoding="utf-8")
+
+            def spawn():
+                with log_path.open("a", encoding="utf-8") as log:
+                    log.write("RuntimeError: openai-codex is not installed\n")
+                return process
+
+            with mock.patch.object(hook, "DAEMON_LOG_PATH", log_path), mock.patch.object(
+                hook,
+                "daemon_proxy",
+                return_value=proxy,
+            ), mock.patch.object(hook, "_spawn_daemon", side_effect=spawn):
+                started_at = time.monotonic()
+                with self.assertRaises(RuntimeError) as raised:
+                    hook.ensure_daemon_running(self.config())
+
+        message = str(raised.exception)
+        self.assertLess(time.monotonic() - started_at, 1)
+        self.assertIn("exited with code 1", message)
+        self.assertIn("openai-codex is not installed", message)
+        self.assertNotIn("earlier assessment record", message)
+
+    def test_hook_error_reports_daemon_fault_reason(self) -> None:
+        stdout = io.StringIO()
+        fault = xmlrpc.client.Fault(1, "<class 'ValueError'>:bad guardian response")
+        with mock.patch("sys.stdout", stdout):
+            hook._handle_error(fault)
+
+        message = json.loads(stdout.getvalue())["hookSpecificOutput"]["decision"][
+            "message"
+        ]
+        self.assertIn(
+            "guardian hook failed: <class 'ValueError'>:bad guardian response.",
+            message,
+        )
+
+    def test_unhealthy_daemon_is_replaced(self) -> None:
+        proxy = mock.Mock()
+        current_status = {
+            "ok": True,
+            "running": True,
+            "api_version": common.DAEMON_API_VERSION,
+            "config_fingerprint": common.config_fingerprint(self.config()),
+        }
+        proxy.status.side_effect = [{**current_status, "ok": False}, current_status]
+        with mock.patch.object(
+            hook,
+            "daemon_proxy",
+            return_value=proxy,
+        ), mock.patch.object(hook, "_wait_for_daemon_stop"), mock.patch.object(
+            hook,
+            "_spawn_daemon",
+        ) as spawn:
+            hook.ensure_daemon_running(self.config())
+
+        proxy.stop.assert_called_once_with()
+        spawn.assert_called_once_with()
 
     def test_current_daemon_api_version_does_not_restart(self) -> None:
         proxy = mock.Mock()

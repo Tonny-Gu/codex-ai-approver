@@ -11,7 +11,10 @@ import uuid
 
 DEFAULT_CONFIG_PATH = "~/.codex-ai-approver.json"
 POLICY_TEMPLATE_PATH = Path(__file__).with_name("guardian_policy.md")
-DAEMON_API_VERSION = 1
+DAEMON_API_VERSION = 2
+# XML-RPC fault code for an assessment that failed because the daemon's Codex
+# app-server is gone. The hook replaces the daemon and retries once.
+CODEX_UNAVAILABLE_FAULT = 2
 
 RISK_LEVELS = ("low", "medium", "high", "critical")
 USER_AUTHORIZATION_LEVELS = ("prohibited", "none", "low", "medium", "high")

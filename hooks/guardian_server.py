@@ -7,11 +7,13 @@ from threading import Event, Lock
 from typing import Any
 from xmlrpc.server import SimpleXMLRPCServer
 import json
+import xmlrpc.client
 import logging
 import sys
 import time
 
 from guardian_common import (
+    CODEX_UNAVAILABLE_FAULT,
     DAEMON_API_VERSION,
     OUTPUT_SCHEMA,
     GuardianAssessment,
@@ -56,6 +58,10 @@ class GuardianDaemon:
         self._approval_mode: Any = None
         self._sandbox: Any = None
         self._revert_response: Any = None
+        # Errors meaning the Codex app-server process is gone: writes to its
+        # stdin fail with BrokenPipeError, reads raise TransportClosedError.
+        self._transport_errors: tuple[type[Exception], ...] = ()
+        self.codex_failure: str | None = None
         self._threads: dict[tuple[str, str], _GuardianThreadState] = {}
         self._threads_lock = Lock()
         self._batches: dict[
@@ -66,7 +72,12 @@ class GuardianDaemon:
 
     def start(self) -> None:
         try:
-            from openai_codex import ApprovalMode, Codex, Sandbox
+            from openai_codex import (
+                ApprovalMode,
+                Codex,
+                Sandbox,
+                TransportClosedError,
+            )
             from openai_codex.generated.v2_all import ThreadRevertResponse
             from openai_codex.types import ReasoningEffort
         except ModuleNotFoundError as exc:
@@ -77,6 +88,7 @@ class GuardianDaemon:
         self._approval_mode = ApprovalMode
         self._sandbox = Sandbox
         self._revert_response = ThreadRevertResponse
+        self._transport_errors = (TransportClosedError, BrokenPipeError)
         self._effort = ReasoningEffort(self.config.reasoning_effort)
         self._codex = Codex()
 
@@ -110,11 +122,14 @@ class GuardianDaemon:
         return pending.assessment
 
     def status(self) -> dict[str, Any]:
+        # A dead Codex app-server is not restarted in place. Reporting not-ok
+        # makes the hook replace this daemon.
         return {
-            "ok": True,
+            "ok": self.codex_failure is None,
             "running": True,
             "api_version": DAEMON_API_VERSION,
             "config_fingerprint": config_fingerprint(self.config),
+            "codex_failure": self.codex_failure,
         }
 
     def close(self) -> None:
@@ -129,6 +144,8 @@ class GuardianDaemon:
             for pending in batch:
                 pending.assessment = assessments[pending.hook_input.request_id]
         except Exception as exc:
+            if isinstance(exc, self._transport_errors):
+                self.codex_failure = f"{type(exc).__name__}: {exc}"
             for pending in batch:
                 pending.error = exc
         finally:
@@ -415,7 +432,15 @@ def run_daemon() -> int:
         )
 
         def assess(payload: Any) -> dict[str, str]:
-            return guardian.assess(PermissionRequestInput(**payload)).__dict__
+            try:
+                return guardian.assess(PermissionRequestInput(**payload)).__dict__
+            except Exception as exc:
+                if guardian.codex_failure is None:
+                    raise
+                raise xmlrpc.client.Fault(
+                    CODEX_UNAVAILABLE_FAULT,
+                    f"guardian Codex app-server is unavailable: {exc}",
+                ) from exc
 
         def stop() -> dict[str, bool]:
             stop_requested.set()
