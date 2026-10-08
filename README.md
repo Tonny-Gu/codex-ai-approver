@@ -20,7 +20,7 @@ Add this repository as a Codex plugin marketplace and install the plugin:
 
 ```bash
 codex plugin marketplace add Tonny-Gu/codex-ai-approver --ref main
-codex plugin list --available
+codex plugin list --marketplace codex-ai-approver
 codex plugin add codex-ai-approver@codex-ai-approver
 ```
 
